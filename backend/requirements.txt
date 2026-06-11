@@ -1,0 +1,9 @@
+# Cogito backend dependencies (self-built FastAPI + hand-written agent engine).
+# Kept minimal; native provider SDKs (anthropic, etc.) arrive in later phases.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+Pillow==11.1.0
+httpx==0.28.1
+PyYAML>=6.0
+pyinstaller==6.11.1
