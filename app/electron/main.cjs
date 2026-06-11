@@ -18,19 +18,19 @@ const { spawn } = require("child_process");
 const PACKED = app.isPackaged;
 
 // CSRF 防护:本进程随机生成一个 shell 令牌。
-// - 启动后端时通过环境变量 AIH_SHELL_TOKEN 传给它
-// - 给所有发往后端(127.0.0.1:8756)的请求注入 X-AIH-Shell 头
-// 后端据此识别「请求确实来自 ai-helper 外壳」,而浏览器里的恶意网页
+// - 启动后端时通过环境变量 COGITO_SHELL_TOKEN 传给它
+// - 给所有发往后端(127.0.0.1:8756)的请求注入 X-Cogito-Shell 头
+// 后端据此识别「请求确实来自 Cogito 外壳」,而浏览器里的恶意网页
 // 拿不到这个令牌、也无法经过本 session 注入 → 无法伪造。
 const SHELL_TOKEN = crypto.randomBytes(24).toString("hex");
-const ROOT = path.join(__dirname, "..", ".."); // dev: D:\ai-helper
+const ROOT = path.join(__dirname, "..", ".."); // dev: D:\Cogito
 const APP_DIR = path.join(ROOT, "app");
 const BACKEND_DIR = path.join(ROOT, "backend");
 const PY = path.join(BACKEND_DIR, ".venv", "Scripts", "python.exe");
 const VITE_JS = path.join(APP_DIR, "node_modules", "vite", "bin", "vite.js");
 // 打包后：后端是 PyInstaller 冻结的单 exe，放在 resources/backend/
 const BACKEND_EXE = process.resourcesPath
-  ? path.join(process.resourcesPath, "backend", "ai-helper-backend.exe")
+  ? path.join(process.resourcesPath, "backend", "cogito-backend.exe")
   : "";
 const MODELS_DIR = path.join(ROOT, "ollama", "models");
 const DEV_URL = "http://127.0.0.1:5173";
@@ -84,7 +84,7 @@ async function ensureOllama() {
 async function ensureBackend() {
   if (await httpOk("http://127.0.0.1:8756/api/health")) return;
   // 把 shell 令牌通过环境变量交给后端,供 CSRF 校验
-  const backendEnv = { ...process.env, AIH_SHELL_TOKEN: SHELL_TOKEN };
+  const backendEnv = { ...process.env, COGITO_SHELL_TOKEN: SHELL_TOKEN };
   if (PACKED) {
     if (!fs.existsSync(BACKEND_EXE)) return;
     backendProc = spawn(BACKEND_EXE, [], {
@@ -152,7 +152,7 @@ ipcMain.handle("dialog:pickFolder", async (e) => {
 function readSavedTheme() {
   try {
     const candidates = PACKED
-      ? [path.join(process.env.APPDATA || "", "ai-helper", "settings.json")]
+      ? [path.join(process.env.APPDATA || "", "Cogito", "settings.json")]
       : [path.join(ROOT, "data", "settings.json")];
     for (const p of candidates) {
       if (p && fs.existsSync(p)) {
@@ -179,7 +179,7 @@ function createWindow() {
     height: 780,
     minWidth: 900,
     minHeight: 600,
-    title: "ai-helper",
+    title: "Cogito",
     icon: path.join(ROOT, "assets", "icon.ico"),
     backgroundColor: bg,
     show: false, // 先建好再 show,避免空白白底闪一下
@@ -209,7 +209,7 @@ app.whenReady().then(async () => {
       ],
     },
     (details, cb) => {
-      details.requestHeaders["X-AIH-Shell"] = SHELL_TOKEN;
+      details.requestHeaders["X-Cogito-Shell"] = SHELL_TOKEN;
       cb({ requestHeaders: details.requestHeaders });
     },
   );

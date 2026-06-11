@@ -1,4 +1,4 @@
-"""ai-helper 后端日志:5MB × 2 滚动文件,总盘大约 10MB。
+"""Cogito 后端日志:5MB × 2 滚动文件,总盘大约 10MB。
 
 用法:启动时 setup_logging() 一次;之后用 logging.getLogger("aih") 写自己的;
 uvicorn/uvicorn.error/uvicorn.access 也会被劫持落到同一份日志,方便统一查。
@@ -14,7 +14,7 @@ from typing import Any
 from config import DATA_DIR
 
 LOG_DIR = DATA_DIR / "logs"
-LOG_PATH = LOG_DIR / "ai-helper.log"
+LOG_PATH = LOG_DIR / "cogito.log"
 MAX_BYTES = 5 * 1024 * 1024  # 5MB / 文件
 BACKUP_COUNT = 1              # 1 个备份文件 → 总约 10MB
 _INSTALLED = False

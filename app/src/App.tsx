@@ -20,7 +20,7 @@ import {
 
 declare global {
   interface Window {
-    aihelper?: {
+    cogito?: {
       isElectron?: boolean;
       setNativeTheme?: (t: string) => void;
       pickFolder?: () => Promise<string>;
@@ -38,7 +38,7 @@ function effective(theme: ThemeMode): "dark" | "light" {
 
 export function applyTheme(theme: ThemeMode) {
   document.documentElement.dataset.theme = effective(theme);
-  window.aihelper?.setNativeTheme?.(theme);
+  window.cogito?.setNativeTheme?.(theme);
 }
 
 export default function App() {

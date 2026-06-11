@@ -50,7 +50,7 @@ export default function Sidebar({
     <nav className="sidebar">
       <div className="brand">
         <span className="brand-dot" />
-        ai-helper
+        Cogito
       </div>
       <div className="nav-block">
         {NAV.map((n) => (

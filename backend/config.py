@@ -20,13 +20,13 @@ from typing import Any
 import httpx
 
 if getattr(sys, "frozen", False):
-    # PyInstaller 打包后：exe 位于 <resources>/backend/ai-helper-backend.exe
+    # PyInstaller 打包后：exe 位于 <resources>/backend/cogito-backend.exe
     # → PROJECT_ROOT=<resources>（含 skills/）；data 写到可写的 %APPDATA%
     _EXE = Path(sys.executable).resolve()
     PROJECT_ROOT = _EXE.parent.parent
     DATA_DIR = Path(
         os.environ.get("APPDATA") or str(PROJECT_ROOT)
-    ) / "ai-helper"
+    ) / "Cogito"
 else:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR = PROJECT_ROOT / "data"
@@ -112,7 +112,7 @@ def _ensure_token(s: dict[str, Any]) -> bool:
         s["token"] = secrets.token_urlsafe(24)
         dirty = True
     if not s.get("proxy_api_key"):
-        s["proxy_api_key"] = "aih-" + secrets.token_urlsafe(20)
+        s["proxy_api_key"] = "cogito-" + secrets.token_urlsafe(20)
         dirty = True
     return dirty
 
@@ -123,7 +123,7 @@ def get_proxy_key() -> str:
 
 def regenerate_proxy_key() -> str:
     s = load_settings()
-    s["proxy_api_key"] = "aih-" + secrets.token_urlsafe(20)
+    s["proxy_api_key"] = "cogito-" + secrets.token_urlsafe(20)
     save_settings(s)
     return s["proxy_api_key"]
 

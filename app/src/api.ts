@@ -463,14 +463,14 @@ export const deleteConversation = (id: string) =>
 
 // 原生文件夹选择器（仅 Electron 外壳；远程浏览器没有这个能力）。
 export const hasNativePicker = (): boolean => {
-  const w = window as unknown as { aihelper?: { pickFolder?: unknown } };
-  return typeof w.aihelper?.pickFolder === "function";
+  const w = window as unknown as { cogito?: { pickFolder?: unknown } };
+  return typeof w.cogito?.pickFolder === "function";
 };
 export const pickFolder = async (): Promise<string> => {
   const w = window as unknown as {
-    aihelper?: { pickFolder?: () => Promise<string> };
+    cogito?: { pickFolder?: () => Promise<string> };
   };
-  return w.aihelper?.pickFolder ? await w.aihelper.pickFolder() : "";
+  return w.cogito?.pickFolder ? await w.cogito.pickFolder() : "";
 };
 
 // 流式对话

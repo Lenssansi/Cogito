@@ -1,6 +1,6 @@
 """聚合 API 代理 —— OpenAI 兼容的本地端点 /v1/*。
 
-供其他工具(Cline、Cursor、NextChat 等)把 ai-helper 当统一接入口:
+供其他工具(Cline、Cursor、NextChat 等)把 Cogito 当统一接入口:
 - 鉴权: Authorization: Bearer <proxy_api_key>(在「设置」页查看/重置)
 - 模型路由: 客户端传 model = "provider_name/model_id" 走对应 provider;
   传裸 model_id 则按 active provider 匹配(没匹配上随便挑一个有该 model_id 的)

@@ -205,7 +205,7 @@ def _git(args: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def git_checkpoint(message: str = "ai-helper checkpoint") -> dict[str, Any]:
+def git_checkpoint(message: str = "Cogito checkpoint") -> dict[str, Any]:
     cwd = _cwd()
     if not path_in_scope(cwd):
         raise ToolError("工作目录不在授权白名单内")

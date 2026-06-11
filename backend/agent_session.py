@@ -135,7 +135,7 @@ def _rec(run: dict, obj: dict) -> bytes:
     return _sse(obj)
 
 _SYS = (
-    "你是 ai-helper 的编程 Agent。只能在当前工作目录及授权白名单内操作。"
+    "你是 Cogito 的编程 Agent。只能在当前工作目录及授权白名单内操作。"
     "用提供的工具完成用户的编程/文件任务：先用只读工具(list_dir/read_file/"
     "search_text)了解情况，再做最小且精确的改动(edit_file 优先于 write_file)。"
     "改完代码调用 run_tests 验证。一次只调用一个工具。"
@@ -232,7 +232,7 @@ async def _drive(rid: str) -> AsyncIterator[bytes]:
 
     # 任务开始打 git 检查点（仅一次）
     if run["checkpoint"] is None:
-        cp = run_tool("git_checkpoint", {"message": "ai-helper agent 起点"})
+        cp = run_tool("git_checkpoint", {"message": "Cogito agent 起点"})
         if "error" in cp:
             run["status"] = "error"
             yield _rec(run, {"type": "error",

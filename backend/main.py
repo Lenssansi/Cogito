@@ -1,4 +1,4 @@
-"""ai-helper 后端入口（P0 骨架）。
+"""Cogito 后端入口（P0 骨架）。
 
 唯一核心服务：同时服务本机 Electron 外壳与浏览器（本机/局域网/ZeroTier）。
 P3：本地小模型「大脑」(路由/直答/摘要)。
@@ -73,11 +73,11 @@ from store import (
 
 APP_VERSION = "0.2.0-p2"
 
-# 日志一次性初始化:5MB×2 滚动到 data/logs/ai-helper.log;接管 uvicorn
+# 日志一次性初始化:5MB×2 滚动到 data/logs/cogito.log;接管 uvicorn
 import applog
 applog.setup_logging()
 
-app = FastAPI(title="ai-helper", version=APP_VERSION)
+app = FastAPI(title="Cogito", version=APP_VERSION)
 
 # 开发期前端跑在 Vite(5173)，与后端(8756)跨端口，需放行本地源。
 app.add_middleware(
@@ -99,12 +99,12 @@ app.add_middleware(
 # 状态变更请求(POST/PUT/PATCH/DELETE)必须来自可信来源,否则 403。
 #
 # 放行判定(任一成立):
-#  1. 带 Electron 外壳注入的 X-AIH-Shell 令牌(app 自身请求,启动时由
+#  1. 带 Electron 外壳注入的 X-Cogito-Shell 令牌(app 自身请求,启动时由
 #     Electron 主进程通过 onBeforeSendHeaders 注入,网页伪造不了)
 #  2. Origin 与本服务同源(Origin 的 host:port == Host 头)
 #  3. Origin 是开发期 Vite(5173)
 #  4. 无 Origin 且非浏览器跨站(curl/Cline 等原生客户端,本就不是 CSRF 媒介)
-_SHELL_TOKEN = os.environ.get("AIH_SHELL_TOKEN", "")
+_SHELL_TOKEN = os.environ.get("COGITO_SHELL_TOKEN", "")
 _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _CSRF_DEV_ORIGINS = {
     "http://localhost:5173", "http://127.0.0.1:5173",
@@ -114,7 +114,7 @@ _CSRF_DEV_ORIGINS = {
 def _csrf_ok(request: Request) -> bool:
     # 1) Electron 外壳令牌
     if _SHELL_TOKEN:
-        tok = request.headers.get("X-AIH-Shell", "")
+        tok = request.headers.get("X-Cogito-Shell", "")
         if tok and secrets.compare_digest(tok, _SHELL_TOKEN):
             return True
     origin = request.headers.get("origin")
@@ -147,7 +147,7 @@ async def csrf_guard(request: Request, call_next):
         return JSONResponse(
             status_code=403,
             content={"detail": "CSRF 校验失败:请求来源不可信。"
-                     "请通过 ai-helper 本体或同源页面访问。"},
+                     "请通过 Cogito 本体或同源页面访问。"},
         )
     return await call_next(request)
 
@@ -668,7 +668,7 @@ async def git_install(
     return {
         "ok": bool(found),
         "path": found or "",
-        "note": ("Git 已装,但当前后端进程 PATH 还没刷新——重启 ai-helper "
+        "note": ("Git 已装,但当前后端进程 PATH 还没刷新——重启 Cogito "
                   "应能识别。"
                   if (found and not shutil.which("git")) else ""),
         "installer_log_tail": (r.stdout or "")[-800:],
@@ -1174,7 +1174,7 @@ def main() -> None:
     settings = load_settings()
     host = settings["host"]
     port = int(settings["port"])
-    print(f"[ai-helper] backend on http://{host}:{port}  (remote_enabled="
+    print(f"[Cogito] backend on http://{host}:{port}  (remote_enabled="
           f"{settings['remote_enabled']})")
     uvicorn.run(app, host=host, port=port, log_level="info")
 

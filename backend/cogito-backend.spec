@@ -35,7 +35,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='ai-helper-backend',
+    name='cogito-backend',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

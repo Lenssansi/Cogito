@@ -1,5 +1,5 @@
 {
-  "name": "ai-helper-app",
+  "name": "cogito-app",
   "private": true,
   "version": "0.1.1",
   "description": "本地部署的个人 AI 助手（对话/编程Agent/本地模型/联网/文件）",
@@ -14,13 +14,13 @@
     "dist": "vite build && electron-builder"
   },
   "build": {
-    "appId": "com.aihelper.app",
-    "productName": "ai-helper",
+    "appId": "com.cogito.app",
+    "productName": "Cogito",
     "directories": { "output": "../release/v${version}" },
     "files": ["dist/**/*", "electron/**/*", "package.json"],
     "extraResources": [
-      { "from": "../backend/dist/ai-helper-backend.exe",
-        "to": "backend/ai-helper-backend.exe" },
+      { "from": "../backend/dist/cogito-backend.exe",
+        "to": "backend/cogito-backend.exe" },
       { "from": "../skills", "to": "skills",
         "filter": ["**/*", "!**/.git/**"] }
     ],
@@ -38,7 +38,7 @@
       "menuCategory": false,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
-      "shortcutName": "ai-helper"
+      "shortcutName": "Cogito"
     }
   },
   "dependencies": {
