@@ -1,0 +1,9 @@
+# 统一换行符:仓库内和各平台工作区都用 LF,消除 Windows 的 CRLF 噪音,
+# 也避免 diff 里混进整行的"假改动"。
+* text=auto eol=lf
+
+# 二进制文件:不做文本/换行处理,也不在 diff 里展开
+*.png binary
+*.ico binary
+*.jpg binary
+*.gif binary
