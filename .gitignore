@@ -23,6 +23,11 @@ settings.json
 settings.json.bak
 settings.json.tmp
 
+# ── 私人速查 / 本地密钥(习惯:gitignore 的 1.txt,绝不提交)──
+1.txt
+*.local
+*.secret
+
 # ── 打包产物 ────────────────────────────────────────────
 release/
 *.exe
