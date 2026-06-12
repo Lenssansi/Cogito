@@ -50,11 +50,15 @@ from config import (
     upsert_provider,
 )
 from skills_loader import status as skills_status
-from agent_session import rollback as agent_rollback
-from agent_session import stream_continue, stream_respond, stream_start
-from chat_agent import stop_run as cf_stop_run
-from chat_agent import stream_respond as cf_respond
-from chat_agent import stream_start as cf_start
+from agents import (
+    agent_rollback,
+    agent_stream_continue,
+    agent_stream_respond,
+    agent_stream_start,
+    fs_stop_run,
+    fs_stream_respond,
+    fs_stream_start,
+)
 from brain import ollama_status, route, summarize
 from search import as_context, test_query as _search_test, web_search
 from llm import build_provider
@@ -821,7 +825,7 @@ def workspace_git_init(
     body: dict,
     caller: Caller = Depends(require_permission("settings")),  # noqa: ARG001
 ) -> dict:
-    from agent_tools import git_init, ToolError
+    from cogito_engine.tools import git_init, ToolError
     try:
         return git_init(body.get("path", ""))
     except ToolError as e:
@@ -834,7 +838,7 @@ async def agent_start(
     caller: Caller = Depends(require_permission("agent")),  # noqa: ARG001
 ) -> StreamingResponse:
     return StreamingResponse(
-        stream_start(body.task, web=body.web),
+        agent_stream_start(body.task, web=body.web),
         media_type="text/event-stream",
     )
 
@@ -845,7 +849,7 @@ async def agent_respond(
     caller: Caller = Depends(require_permission("agent")),  # noqa: ARG001
 ) -> StreamingResponse:
     return StreamingResponse(
-        stream_respond(body.run_id, body.approve, body.edited_args),
+        agent_stream_respond(body.run_id, body.approve, body.edited_args),
         media_type="text/event-stream",
     )
 
@@ -856,7 +860,7 @@ async def agent_continue(
     caller: Caller = Depends(require_permission("agent")),  # noqa: ARG001
 ) -> StreamingResponse:
     return StreamingResponse(
-        stream_continue(body.run_id, body.task, web=body.web),
+        agent_stream_continue(body.run_id, body.task, web=body.web),
         media_type="text/event-stream",
     )
 
@@ -904,7 +908,7 @@ async def chatfs_start(
         raise HTTPException(status_code=403,
                             detail="文件模式仅本机可用（远程已禁用）")
     return StreamingResponse(
-        cf_start(body.messages, body.base, body.mode),
+        fs_stream_start(body.messages, body.base, body.mode),
         media_type="text/event-stream",
     )
 
@@ -923,7 +927,7 @@ def chatfs_stop(
     无法打开文件」的卡死问题。仅本机。"""
     if caller.trust != "local":
         raise HTTPException(status_code=403, detail="文件模式仅本机可用")
-    return {"ok": cf_stop_run(body.run_id)}
+    return {"ok": fs_stop_run(body.run_id)}
 
 
 @app.post("/api/chatfs/respond")
@@ -935,7 +939,7 @@ async def chatfs_respond(
         raise HTTPException(status_code=403,
                             detail="文件模式仅本机可用（远程已禁用）")
     return StreamingResponse(
-        cf_respond(body.run_id, body.approve, body.edited_args),
+        fs_stream_respond(body.run_id, body.approve, body.edited_args),
         media_type="text/event-stream",
     )
 

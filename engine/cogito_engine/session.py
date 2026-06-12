@@ -200,6 +200,27 @@ class AgentSession:
         async for ev in self._begin_turn(task, exclude_tools):
             yield ev
 
+    async def run_from(self, messages: list[dict], *,
+                       exclude_tools: set[str] | None = None
+                       ) -> AsyncIterator[dict]:
+        """以**宿主维护的全量历史**开跑一轮(不追加 user 消息、不做临时
+        授权抽取)。适合无状态宿主:每轮把完整对话历史传进来,如文件助手
+        模式(前端持有历史)。"""
+        if self.status != "ready":
+            yield {"type": "error",
+                   "error": "会话已开始,请用 continue_/respond"}
+            return
+        self.messages = [self.messages[0]] + [dict(m) for m in messages]
+        self._batch = []
+        self._bi = 0
+        self._exclude = set(exclude_tools or ())
+        self._nudged = False
+        self._cancelled = False
+        self.status = "running"
+        self._persist()
+        async for ev in self._drive():
+            yield ev
+
     async def continue_(self, task: str, *,
                         exclude_tools: set[str] | None = None
                         ) -> AsyncIterator[dict]:

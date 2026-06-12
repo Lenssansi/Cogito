@@ -325,6 +325,43 @@ def test_exclude_tools_filters_specs(tmp_path):
     assert "run_command" not in names and "read_file" in names
 
 
+# ---------- run_from:宿主管历史(无状态宿主,如文件助手) ----------
+
+def test_run_from_uses_host_history(tmp_path):
+    (tmp_path / "a.txt").write_text("数据A", encoding="utf-8")
+    s, prov = _session(tmp_path, [
+        _tc("read_file", {"path": "a.txt"}),
+        _answer("读完了"),
+    ])
+    history = [
+        {"role": "user", "content": "之前聊过的"},
+        {"role": "assistant", "content": "嗯"},
+        {"role": "user", "content": "读一下 a.txt"},
+    ]
+    events = _collect(s.run_from(history))
+    assert events[-1]["type"] == "done"
+    # 模型收到 [system] + 宿主全量历史,不额外追加 user
+    first_msgs = prov.calls[0][0]
+    assert first_msgs[0]["role"] == "system"
+    assert [m["content"] for m in first_msgs[1:4]] == [
+        "之前聊过的", "嗯", "读一下 a.txt"]
+    results = [e for e in events if e["type"] == "result"]
+    assert "数据A" in str(results[0]["result"])
+
+
+def test_run_from_confirm_then_respond(tmp_path):
+    (tmp_path / "x.txt").write_text("x", encoding="utf-8")
+    s, _ = _session(tmp_path, [
+        _tc("delete_path", {"path": "x.txt"}),
+        _answer("删除完成"),
+    ])
+    ev1 = _collect(s.run_from([{"role": "user", "content": "删 x.txt"}]))
+    assert ev1[-1]["type"] == "confirm" and s.status == "awaiting"
+    ev2 = _collect(s.respond(approve=True))
+    assert ev2[-1]["type"] == "done"
+    assert not (tmp_path / "x.txt").exists()
+
+
 # ---------- provider 出错 ----------
 
 def test_provider_exception_becomes_error_event(tmp_path):
