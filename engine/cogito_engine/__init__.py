@@ -10,6 +10,7 @@ from .scope import AllowAllScope, DirScope
 from .confirm import RiskyConfirmPolicy
 from .store import MemoryStore
 from .tools import ToolError, ToolRegistry
+from .session import AgentSession, DEFAULT_SYSTEM_PROMPT
 from .providers import (
     OpenAICompatProvider,
     ProviderError,
@@ -30,6 +31,8 @@ __all__ = [
     "MemoryStore",
     "ToolRegistry",
     "ToolError",
+    "AgentSession",
+    "DEFAULT_SYSTEM_PROMPT",
     "ProviderError",
     "StreamingProvider",
     "OpenAICompatProvider",
