@@ -1,8 +1,12 @@
-"""DirScope —— 基于目录的路径护栏(库自带的默认 Scope 实现)。
+"""Scope 实现:路径护栏的两种内置形态。
 
-规则:路径 resolve 后必须落在某个授权根目录内(防 ..\\ 目录穿越);
-此外,本轮用户明确写出的绝对路径可经 grant_temporary 临时放行——
-**不是"非授权目录就一律拒绝",而是用户点名时允许临时访问。**
+- DirScope:白名单目录 + 临时授权(编程 Agent 模式)。路径 resolve 后必须
+  落在某个授权根内(防 ..\\ 穿越);本轮用户明确写出的绝对路径可经
+  grant_temporary 临时放行——**不是"非授权就一律拒绝",而是点名即准**。
+- AllowAllScope:全盘放行(文件助手模式)。⚠️ 必须配合"高危工具执行前
+  用户确认"(ConfirmPolicy)使用,确认即是这种模式下唯一的安全网。
+
+统一工具集只面向 Scope 协议——两种模式共用同一份工具代码,差异全在这里。
 """
 
 from __future__ import annotations
@@ -56,3 +60,24 @@ class DirScope:
             except (OSError, RuntimeError, ValueError):
                 continue
         return False
+
+
+class AllowAllScope:
+    """全盘访问(文件助手模式):一切非空路径放行;cwd = 会话基准目录,
+    供相对路径解析。grant_temporary 是空操作(本就全放行)。"""
+
+    def __init__(self, cwd: str = "") -> None:
+        try:
+            self._cwd = str(Path(cwd or Path.cwd()).resolve())
+        except (OSError, RuntimeError):
+            self._cwd = str(Path.cwd())
+
+    @property
+    def cwd(self) -> str:
+        return self._cwd
+
+    def grant_temporary(self, paths: list[str]) -> None:
+        return None
+
+    def is_allowed(self, path: str) -> bool:
+        return bool(path)

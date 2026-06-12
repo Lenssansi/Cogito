@@ -6,9 +6,10 @@
 """
 
 from .types import ConfirmPolicy, Provider, Scope, SessionStore
-from .scope import DirScope
+from .scope import AllowAllScope, DirScope
 from .confirm import RiskyConfirmPolicy
 from .store import MemoryStore
+from .tools import ToolError, ToolRegistry
 from .providers import (
     OpenAICompatProvider,
     ProviderError,
@@ -24,8 +25,11 @@ __all__ = [
     "ConfirmPolicy",
     "SessionStore",
     "DirScope",
+    "AllowAllScope",
     "RiskyConfirmPolicy",
     "MemoryStore",
+    "ToolRegistry",
+    "ToolError",
     "ProviderError",
     "StreamingProvider",
     "OpenAICompatProvider",
