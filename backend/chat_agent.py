@@ -13,7 +13,8 @@ import uuid
 from typing import Any, AsyncIterator
 
 from config import confirm_required, get_active_resolved
-from providers.openai_compat import OpenAICompatProvider
+from cogito_engine.providers import OpenAICompatProvider
+from llm import build_provider
 import chatfs
 import settings_tools
 import userdirs
@@ -50,7 +51,7 @@ def _provider() -> tuple[OpenAICompatProvider | None, str]:
         return None, err
     if not r or not r.get("api_key"):
         return None, "未配置可用 API key"
-    return OpenAICompatProvider(r), ""
+    return build_provider(r), ""
 
 
 def _sse(o: dict) -> bytes:

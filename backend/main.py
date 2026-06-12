@@ -57,8 +57,8 @@ from chat_agent import stream_respond as cf_respond
 from chat_agent import stream_start as cf_start
 from brain import ollama_status, route, summarize
 from search import as_context, test_query as _search_test, web_search
-from providers import get_provider as build_provider
-from providers.base import ProviderError
+from llm import build_provider
+from cogito_engine.providers import ProviderError
 from security import Caller, get_caller, require_permission
 from store import (
     delete_agent,

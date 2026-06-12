@@ -21,7 +21,8 @@ from config import (
 import re
 
 from skills_loader import build_injection
-from providers.openai_compat import OpenAICompatProvider
+from cogito_engine.providers import OpenAICompatProvider
+from llm import build_provider
 from agent_tools import (
     is_high_risk, run_tool, set_extra_paths, set_todos, tool_specs,
 )
@@ -165,7 +166,7 @@ def _provider() -> tuple[OpenAICompatProvider | None, str]:
         return None, err
     if not r or not r.get("api_key"):
         return None, "未配置可用 API key"
-    return OpenAICompatProvider(r), ""
+    return build_provider(r), ""
 
 
 def start_run(task: str, web: bool = True) -> tuple[str | None, str | None]:

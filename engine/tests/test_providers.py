@@ -1,0 +1,196 @@
+"""Provider 解析测试 —— 全部离线:httpx.MockTransport 喂假响应,不连网。
+
+覆盖:tool_calls 解析 / 坏 JSON 容错 / 非 200 报错 / 缺 key 先验 /
+base_url 归一化 / 空 tools 不传 / usage 回调(含回调抛错不影响主流程)/
+工厂分发 / 流式逐段产出(answer + reasoning)。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import httpx
+import pytest
+
+from cogito_engine.providers import (
+    OpenAICompatProvider,
+    ProviderError,
+    get_provider,
+)
+
+
+def _cfg(**over):
+    cfg = {
+        "base_url": "https://api.example.com",  # 故意不带 /v1,测归一化
+        "api_key": "sk-test",
+        "model": "test-model",
+        "extra_body": {},
+        "provider_id": "p1",
+        "provider_name": "Example",
+    }
+    cfg.update(over)
+    return cfg
+
+
+def _json_transport(payload: dict, status: int = 200) -> httpx.MockTransport:
+    return httpx.MockTransport(
+        lambda request: httpx.Response(status, json=payload)
+    )
+
+
+# ---------- tool_complete ----------
+
+def test_tool_complete_parses_tool_calls():
+    payload = {
+        "choices": [{"message": {
+            "content": "",
+            "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "read_file",
+                             "arguments": json.dumps({"path": "a.txt"})},
+            }],
+        }}],
+    }
+    prov = OpenAICompatProvider(_cfg(), transport=_json_transport(payload))
+    r = asyncio.run(prov.tool_complete([{"role": "user", "content": "hi"}], []))
+    assert r["tool_calls"] == [
+        {"id": "call_1", "name": "read_file", "arguments": {"path": "a.txt"}}
+    ]
+
+
+def test_bad_arguments_json_degrades_to_empty_dict():
+    payload = {
+        "choices": [{"message": {
+            "content": "",
+            "tool_calls": [{
+                "id": "c", "type": "function",
+                "function": {"name": "x", "arguments": "{oops not json"},
+            }],
+        }}],
+    }
+    prov = OpenAICompatProvider(_cfg(), transport=_json_transport(payload))
+    r = asyncio.run(prov.tool_complete([{"role": "user", "content": "hi"}], []))
+    assert r["tool_calls"][0]["arguments"] == {}
+
+
+def test_non_200_raises_provider_error_with_status():
+    prov = OpenAICompatProvider(
+        _cfg(),
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(500, text="boom")
+        ),
+    )
+    with pytest.raises(ProviderError) as ei:
+        asyncio.run(prov.tool_complete([{"role": "user", "content": "x"}], []))
+    assert "500" in str(ei.value)
+
+
+def test_missing_api_key_raises_before_http():
+    prov = OpenAICompatProvider(_cfg(api_key=""))  # 没给 transport:真发请求就会炸
+    with pytest.raises(ProviderError):
+        asyncio.run(prov.tool_complete([{"role": "user", "content": "x"}], []))
+
+
+def test_base_url_normalized_and_empty_tools_omitted():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "ok"}}]}
+        )
+
+    prov = OpenAICompatProvider(_cfg(), transport=httpx.MockTransport(handler))
+    r = asyncio.run(prov.tool_complete([{"role": "user", "content": "hi"}], []))
+    assert captured["url"].endswith("/v1/chat/completions")  # 自动补 /v1
+    assert "tools" not in captured["body"]  # 空 tools 不传(部分上游对 [] 报错)
+    assert r["content"] == "ok"
+
+
+def test_tools_included_when_given():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": ""}}]}
+        )
+
+    spec = [{"type": "function",
+             "function": {"name": "t", "description": "",
+                          "parameters": {"type": "object", "properties": {}}}}]
+    prov = OpenAICompatProvider(_cfg(), transport=httpx.MockTransport(handler))
+    asyncio.run(prov.tool_complete([{"role": "user", "content": "hi"}], spec))
+    assert captured["body"]["tools"] == spec
+
+
+# ---------- usage 回调注入 ----------
+
+def test_usage_callback_invoked():
+    usage = {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+    payload = {"choices": [{"message": {"content": "ok"}}], "usage": usage}
+    calls: list = []
+    prov = OpenAICompatProvider(
+        _cfg(),
+        on_usage=lambda pid, name, u: calls.append((pid, name, u)),
+        transport=_json_transport(payload),
+    )
+    asyncio.run(prov.tool_complete([{"role": "user", "content": "hi"}], []))
+    assert calls == [("p1", "Example", usage)]
+
+
+def test_usage_callback_error_never_breaks_main_flow():
+    payload = {"choices": [{"message": {"content": "ok"}}],
+               "usage": {"total_tokens": 1}}
+
+    def bad_hook(pid, name, u):
+        raise RuntimeError("记账崩了")
+
+    prov = OpenAICompatProvider(
+        _cfg(), on_usage=bad_hook, transport=_json_transport(payload)
+    )
+    r = asyncio.run(prov.tool_complete([{"role": "user", "content": "hi"}], []))
+    assert r["content"] == "ok"  # 回调抛错被吞,主流程不受影响
+
+
+# ---------- 工厂 ----------
+
+def test_get_provider_dispatches_openai_compat():
+    p = get_provider(_cfg())
+    assert isinstance(p, OpenAICompatProvider)
+
+
+def test_get_provider_rejects_unknown_format():
+    with pytest.raises(ValueError):
+        get_provider(_cfg(format="some-unknown"))
+
+
+# ---------- stream_chat(流式)----------
+
+def test_stream_chat_yields_reasoning_and_answer_and_records_usage():
+    sse = (
+        b'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":"lo"}}],'
+        b'"usage":{"total_tokens":5}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    calls: list = []
+    prov = OpenAICompatProvider(
+        _cfg(),
+        on_usage=lambda pid, name, u: calls.append(u),
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, content=sse)
+        ),
+    )
+
+    async def collect():
+        return [piece async for piece in
+                prov.stream_chat([{"role": "user", "content": "hi"}])]
+
+    out = asyncio.run(collect())
+    assert ("reasoning", "think") in out
+    assert [p for k, p in out if k == "answer"] == ["Hel", "lo"]
+    assert calls == [{"total_tokens": 5}]

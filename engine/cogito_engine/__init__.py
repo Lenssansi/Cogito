@@ -9,6 +9,12 @@ from .types import ConfirmPolicy, Provider, Scope, SessionStore
 from .scope import DirScope
 from .confirm import RiskyConfirmPolicy
 from .store import MemoryStore
+from .providers import (
+    OpenAICompatProvider,
+    ProviderError,
+    StreamingProvider,
+    get_provider,
+)
 
 __version__ = "0.1.0"
 
@@ -20,4 +26,8 @@ __all__ = [
     "DirScope",
     "RiskyConfirmPolicy",
     "MemoryStore",
+    "ProviderError",
+    "StreamingProvider",
+    "OpenAICompatProvider",
+    "get_provider",
 ]

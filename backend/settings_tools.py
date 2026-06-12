@@ -85,7 +85,7 @@ def remove_allowed_root(path: str) -> dict:
 def make_description() -> dict:
     """让当前模型为本项目写「说明文档」(项目描述)，写到 说明文档.md。"""
     import asyncio
-    from providers import get_provider as _bp
+    from llm import build_provider as _bp
     resolved = config.get_active_resolved()
     if not resolved or not resolved.get("api_key"):
         return {"error": "未配置可用 API"}

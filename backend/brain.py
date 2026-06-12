@@ -44,7 +44,7 @@ async def _complete(messages: list[dict], max_tokens: int = 512) -> str | None:
         )
         if resolved and resolved.get("api_key"):
             try:
-                from providers import get_provider as build_provider
+                from llm import build_provider
                 prov = build_provider(resolved)
                 r = await prov.tool_complete(messages, [])
                 content = (r.get("content") or "").strip()
@@ -140,7 +140,7 @@ async def test_backend() -> dict[str, Any]:
         )
         if resolved and resolved.get("api_key"):
             try:
-                from providers import get_provider as build_provider
+                from llm import build_provider
                 prov = build_provider(resolved)
                 spec = [{
                     "type": "function",
