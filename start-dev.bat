@@ -1,8 +1,7 @@
 @echo off
-chcp 65001 >nul
 cd /d "%~dp0"
 
-REM ── Cogito 开发启动键 ── 双击即可。Electron 会自动拉起后端 + Vite 并开窗。
+REM Cogito dev launcher (double-click). Electron auto-starts backend + Vite, then opens the window.
 if not exist "backend\.venv\Scripts\python.exe" (
   echo [!] backend venv not found. First-time setup, run once:
   echo       python -m venv backend\.venv
@@ -11,7 +10,7 @@ if not exist "backend\.venv\Scripts\python.exe" (
   exit /b 1
 )
 if not exist "app\node_modules" (
-  echo [!] frontend deps not found. First-time setup, run once:  cd app  then  npm install
+  echo [!] frontend deps not found. First-time setup: cd app, then npm install
   pause
   exit /b 1
 )
