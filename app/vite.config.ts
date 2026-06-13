@@ -5,10 +5,10 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   base: "./",
+  // 开发端口由 electron 启动时动态分配(spawn vite 时传 --port + --strictPort),
+  // 这里不写死,免得和别的项目(Vite 默认也用 5173)撞口。直接 `vite` 跑才用默认。
   server: {
     host: "127.0.0.1",
-    port: 5173,
-    strictPort: true,
   },
   build: {
     outDir: "dist",

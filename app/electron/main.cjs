@@ -14,6 +14,7 @@ const http = require("http");
 const fs = require("fs");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
+const net = require("net");
 
 const PACKED = app.isPackaged;
 
@@ -33,7 +34,11 @@ const BACKEND_EXE = process.resourcesPath
   ? path.join(process.resourcesPath, "backend", "cogito-backend.exe")
   : "";
 const MODELS_DIR = path.join(ROOT, "ollama", "models");
-const DEV_URL = "http://127.0.0.1:5173";
+// Vite 开发端口不写死:启动时由 electron 现抓一个空闲端口(见 getFreePort),
+// 再用 --port 传给 vite。多个 Electron+Vite 项目同时跑也永不撞口,也不必
+// 给每个项目预留端口号。下面是占位默认值,dev 启动时会被覆盖。
+let DEV_PORT = 5173;
+let DEV_URL = "http://127.0.0.1:" + DEV_PORT;
 
 let ollamaProc = null;
 let backendProc = null;
@@ -105,11 +110,28 @@ async function ensureBackend() {
   backendProc.on("error", () => (backendProc = null));
 }
 
+// 现抓一个「保证空闲」的端口:listen(0) 让操作系统分配一个空闲口,记下端口
+// 号后立刻关掉这个探测 server。把这个口给 vite 用,就不会和别人撞。
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
 async function ensureVite() {
   if (PACKED) return; // 打包后用构建产物 dist，不需要 Vite
   if (await httpOk(DEV_URL)) return;
   if (!fs.existsSync(VITE_JS)) return;
-  viteProc = spawn(process.execPath, [VITE_JS], {
+  // --port 用 electron 现抓的空闲口覆盖 vite 默认 5173;--strictPort 让万一
+  // 该口在这一瞬被占就报错退出(而非悄悄换口导致 electron 加载错地址)。
+  viteProc = spawn(process.execPath,
+    [VITE_JS, "--port", String(DEV_PORT), "--strictPort"], {
     cwd: APP_DIR,
     stdio: "ignore",
     windowsHide: true,
@@ -231,6 +253,12 @@ app.whenReady().then(async () => {
       cb({ requestHeaders: details.requestHeaders });
     },
   );
+  if (!PACKED) {
+    // dev:现抓一个空闲端口给 vite,避免和别的项目(Vite 默认也用 5173)撞口;
+    // 也杜绝「httpOk 探到别人占的 5173 就误判自己 vite 已就绪、加载别人页面」。
+    DEV_PORT = await getFreePort();
+    DEV_URL = "http://127.0.0.1:" + DEV_PORT;
+  }
   await Promise.all([ensureOllama(), ensureBackend(), ensureVite()]);
   // 开窗前必须同时等到后端 + (dev 模式下) Vite 就绪，否则窗口已开但
   // 后端还没起，前端会立刻报「后端未连接」。两个 wait 并行不串行。
