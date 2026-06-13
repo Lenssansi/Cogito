@@ -265,11 +265,11 @@ export const getAgentSession = (id: string) =>
 export const deleteAgentSession = (id: string) =>
   sendJSON<{ ok: boolean }>(`/api/agent/sessions/${id}`, "DELETE");
 
-export const agentRollback = (run_id: string) =>
+export const agentRollback = (run_id: string, to?: string) =>
   sendJSON<{ rolled_back_to?: string; error?: string }>(
     "/api/agent/rollback",
     "POST",
-    { run_id }
+    { run_id, to }
   );
 
 export interface TodoItem {

@@ -124,7 +124,9 @@ _SYS_UNIFIED = (
 
 def _system_prompt(cwd: str, has_git: bool) -> str:
     git_note = (
-        "【安全网】会话开始已打 git 检查点,用户可一键回滚你的改动。"
+        "【安全网】你这一轮第一次改文件/跑命令前,系统会自动打一个 git "
+        "检查点;用户可一键回滚你某一轮的改动——放手做,但仍要稳。"
+        "(检查点由系统自动管理,你无需、也无法自己打点或回滚。)"
         if has_git else
         "【注意】当前根目录不是 git 仓库,没有检查点/回滚安全网,"
         "改动文件时务必加倍谨慎、改前确认理解正确。"
@@ -165,16 +167,27 @@ def _get_agent_session(rid: str) -> AgentSession | None:
     s = AgentSession.load(
         rid, provider=_tool_provider, registry=_registry(cwd),
         store=_AGENT_STORE, confirm_policy=_confirm_policy(cwd),
-        # 原会话有检查点才继续启用;当初没有(非 git)就保持关
-        checkpoint=bool(data.get("checkpoint")),
+        # 原会话开了 git 安全网就继续启用(与是否已打过点无关——懒打下纯聊天
+        # 会话当下还没有点,但续跑后真动文件时仍需要)。兼容旧档的标量字段。
+        checkpoint=bool(data.get("checkpoint_enabled",
+                                 data.get("checkpoint"))),
     )
     if s is not None:
         _AGENT_SESSIONS[rid] = s
     return s
 
 
-def _web_exclude(web: bool) -> set[str] | None:
-    return None if web else {"web_search"}
+# 检查点/回滚由引擎(懒打)与 UI(一键回滚)管理,**不暴露给模型**:
+# 否则模型自己 git_checkpoint 打的点不进会话检查点列表、回滚会无视它
+# (就是 bug ④c);git_rollback 更不该让模型随手 reset --hard。
+_HIDDEN_TOOLS = {"git_checkpoint", "git_rollback"}
+
+
+def _exclude_tools(web: bool) -> set[str]:
+    ex = set(_HIDDEN_TOOLS)
+    if not web:
+        ex.add("web_search")
+    return ex
 
 
 async def agent_stream_start(task: str, web: bool = True
@@ -197,7 +210,7 @@ async def agent_stream_start(task: str, web: bool = True
         yield _sse({"type": "info",
                     "content": "根目录不是 git 仓库 —— 本会话没有检查点/"
                                "回滚安全网(可在顶部初始化 git)"})
-    async for ev in session.run(task, exclude_tools=_web_exclude(web)):
+    async for ev in session.run(task, exclude_tools=_exclude_tools(web)):
         yield _sse(ev)
 
 
@@ -221,7 +234,7 @@ async def agent_stream_continue(rid: str, task: str, web: bool = True
         return
     # 同步最新的测试命令(设置页可能改了)
     s.registry.test_cmd = config.get_workspace().get("test_cmd", "")
-    async for ev in s.continue_(task, exclude_tools=_web_exclude(web)):
+    async for ev in s.continue_(task, exclude_tools=_exclude_tools(web)):
         yield _sse(ev)
 
 
@@ -234,10 +247,19 @@ def agent_stop(rid: str) -> bool:
     return True
 
 
-def agent_rollback(rid: str) -> dict:
+def agent_rollback(rid: str, to: str | None = None) -> dict:
+    """回滚到本会话的某个检查点(git reset --hard,只作用于根目录这个仓库)。
+
+    - 不传 to → 回到**最早**的点(撤掉整段会话对文件的改动);
+    - 传了 to → 必须是本会话打过的检查点之一,否则拒绝(防越权 reset 到
+      任意 commit / 前端传错)。回滚只动根目录内的 git 仓库,不碰根外。
+    """
     s = _get_agent_session(rid)
     if s is None:
         return {"error": "会话不存在或已过期"}
-    if not s.checkpoint_commit:
-        return {"error": "无可回滚的检查点"}
-    return s.registry.run("git_rollback", {"to": s.checkpoint_commit})
+    if not s.checkpoints:
+        return {"error": "本会话还没有检查点(纯聊天/没改过文件)"}
+    target = to or s.checkpoints[0]
+    if target not in s.checkpoints:
+        return {"error": "回滚目标不是本会话的检查点,已拒绝"}
+    return s.registry.run("git_rollback", {"to": target})

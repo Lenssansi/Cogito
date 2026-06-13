@@ -242,6 +242,53 @@ def test_git_checkpoint_and_rollback(tmp_path):
     assert (tmp_path / "code.py").read_text(encoding="utf-8") == "v1"
 
 
+def test_git_rollback_removes_new_files_but_keeps_ignored(tmp_path):
+    """回滚要把检查点之后**新建**的文件删掉(reset --hard 删不掉未跟踪),
+    但 .gitignore 的文件(如用户私人速查)必须保留。"""
+    _git(["init", "-b", "main"], tmp_path)
+    _git(["config", "user.email", "t@t"], tmp_path)
+    _git(["config", "user.name", "t"], tmp_path)
+    (tmp_path / ".gitignore").write_text("secret.txt\n", encoding="utf-8")
+    reg = _reg(tmp_path)
+    cp = reg.run("git_checkpoint", {"message": "起点"})  # 提交 .gitignore
+
+    # 检查点之后:新建一个普通文件 + 一个被忽略的私人文件
+    (tmp_path / "new.py").write_text("agent 新建的", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("我的密钥", encoding="utf-8")
+
+    rb = reg.run("git_rollback", {"to": cp["checkpoint"]})
+    assert rb.get("rolled_back_to") == cp["checkpoint"]
+    assert not (tmp_path / "new.py").exists()        # 新建文件被清掉
+    assert (tmp_path / "secret.txt").exists()        # 被忽略的私人文件保留
+    assert (tmp_path / "secret.txt").read_text(encoding="utf-8") == "我的密钥"
+
+
+def test_git_checkpoint_fails_loudly_on_commit_failure(tmp_path, monkeypatch):
+    """commit 失败时,git_checkpoint 必须报 error,而不是把旧 HEAD 当作新
+    检查点返回(假回滚点 = 最危险的『安全网其实是空的且不自知』)。"""
+    _git(["init", "-b", "main"], tmp_path)
+    _git(["config", "user.email", "t@t"], tmp_path)
+    _git(["config", "user.name", "t"], tmp_path)
+    (tmp_path / "a.txt").write_text("v1", encoding="utf-8")
+    _git(["add", "-A"], tmp_path)
+    _git(["commit", "-m", "init"], tmp_path)
+    head0 = _git(["rev-parse", "HEAD"], tmp_path).stdout.strip()
+
+    reg = _reg(tmp_path)
+    real_git = reg._git
+
+    def fake_git(args):  # 让 commit 必失败(模拟 pre-commit 钩子/锁/磁盘满)
+        if args and args[0] == "commit":
+            return subprocess.CompletedProcess(args, 1, "", "commit blocked")
+        return real_git(args)
+
+    monkeypatch.setattr(reg, "_git", fake_git)
+    cp = reg.run("git_checkpoint", {"message": "x"})
+    assert "error" in cp                                       # 报错
+    assert "checkpoint" not in cp                              # 不返回假点
+    assert _git(["rev-parse", "HEAD"], tmp_path).stdout.strip() == head0
+
+
 def test_user_dirs_tool(tmp_path):
     r = _reg(tmp_path).run("user_dirs", {})
     assert "home" in r and "desktop" in r

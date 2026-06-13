@@ -316,16 +316,34 @@ class ToolRegistry:
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         c = self._git(["commit", "-m", message, "--allow-empty"])
         head = self._git(["rev-parse", "HEAD"]).stdout.strip()
+        # 必须确认**真的产生了新提交**。有 --allow-empty,正常情况 commit 必成功
+        # 且 HEAD 前移;若 commit 非零返回(pre-commit 钩子失败、index.lock 残留、
+        # 没配 user.name/email、merge/rebase 半途…)或 HEAD 没前移,就**绝不能**
+        # 把旧 HEAD 当检查点返回——否则给用户一个假回滚点(工作树根本没被快照)。
+        if c.returncode != 0 or not head or head == head_before:
+            raise ToolError(
+                "打检查点失败(未生成新提交):"
+                + (c.stderr.strip() or c.stdout.strip() or "未知原因"))
         return {"checkpoint": head, "prev": head_before,
                 "info": c.stdout.strip() or c.stderr.strip()}
 
-    def _t_git_rollback(self, to: str) -> dict[str, Any]:
+    def _t_git_rollback(self, to: str, clean: bool = True) -> dict[str, Any]:
         if not to:
             raise ToolError("缺少回滚目标 commit")
         r = self._git(["reset", "--hard", to])
         if r.returncode != 0:
             raise ToolError(f"回滚失败:{r.stderr.strip()}")
-        return {"rolled_back_to": to, "info": r.stdout.strip()}
+        cleaned = ""
+        if clean:
+            # reset --hard 只还原**已跟踪**文件,不会删检查点之后**新建**的
+            # 未跟踪文件——那正是「改了(新建了)却回滚无效果」的根因。补一刀
+            # git clean -fd 删掉这些新文件/新目录,把工作树真正还原到检查点。
+            # **不加 -x**:.gitignore 的文件(如用户私人速查 1.txt)不动;
+            # clean 只作用于仓库内,绝不触及根目录之外。
+            c = self._git(["clean", "-fd"])
+            cleaned = c.stdout.strip()
+        return {"rolled_back_to": to, "info": r.stdout.strip(),
+                "cleaned": cleaned}
 
     # ---------- TODO 清单(实例状态)----------
 

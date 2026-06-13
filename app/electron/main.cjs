@@ -118,16 +118,34 @@ async function ensureVite() {
   viteProc.on("error", () => (viteProc = null));
 }
 
-function killOurs() {
-  for (const p of [backendProc, viteProc, ollamaProc]) {
-    if (p) {
-      try {
-        p.kill();
-      } catch {
-        /* ignore */
-      }
+// 杀掉一个子进程「及其整棵进程树」。
+// Windows 上 p.kill() 只发给直接子进程:Vite 6 会另起 esbuild 服务子进程、
+// 后端 python 也可能拉子进程,只杀父进程会留孤儿(就是「关窗后 Vite 仍占
+// 5173」的根因)。故用 taskkill /T(连子孙)/F(强杀),同步执行确保退出前杀净。
+function killTree(p) {
+  if (!p || p.killed) return;
+  const pid = p.pid;
+  try {
+    if (process.platform === "win32" && pid) {
+      require("child_process").execFileSync(
+        "taskkill",
+        ["/PID", String(pid), "/T", "/F"],
+        { stdio: "ignore" }
+      );
+    } else {
+      p.kill();
+    }
+  } catch {
+    try {
+      p.kill();
+    } catch {
+      /* ignore */
     }
   }
+}
+
+function killOurs() {
+  for (const p of [backendProc, viteProc, ollamaProc]) killTree(p);
   backendProc = viteProc = ollamaProc = null;
 }
 

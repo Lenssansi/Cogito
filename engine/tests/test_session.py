@@ -220,21 +220,75 @@ def _git(args, cwd):
                           text=True, timeout=30)
 
 
-def test_checkpoint_on_in_git_repo(tmp_path):
+def _init_git(tmp_path):
     _git(["init", "-b", "main"], tmp_path)
     _git(["config", "user.email", "t@t"], tmp_path)
     _git(["config", "user.name", "t"], tmp_path)
-    s, _ = _session(tmp_path, [_answer("好")], checkpoint=True)
-    events = _collect(s.run("随便"))
-    cp = [e for e in events if e["type"] == "checkpoint"]
-    assert cp and cp[0]["commit"]
 
 
-def test_checkpoint_on_in_non_git_dir_errors(tmp_path):
+def test_checkpoint_lazy_skips_pure_chat(tmp_path):
+    """懒打:git 仓库里纯聊天那一轮不打检查点(不再污染历史/留空 commit)。"""
+    _init_git(tmp_path)
     s, _ = _session(tmp_path, [_answer("好")], checkpoint=True)
-    events = _collect(s.run("随便"))
-    assert events[-1]["type"] == "error"
-    assert s.status == "error"
+    events = _collect(s.run("随便聊聊"))
+    assert events[-1]["type"] == "done"
+    assert not any(e["type"] == "checkpoint" for e in events)
+    assert s.checkpoints == []
+
+
+def test_checkpoint_lazy_before_first_mutation(tmp_path):
+    """懒打:改文件那一轮,在改动工具执行前打恰好一个检查点。"""
+    _init_git(tmp_path)
+    s, _ = _session(
+        tmp_path,
+        [_tc("write_file", {"path": "a.txt", "content": "hi"}),
+         _answer("写好了")],
+        checkpoint=True,
+    )
+    events = _collect(s.run("写个 a.txt"))
+    types = [e["type"] for e in events]
+    assert types.count("checkpoint") == 1
+    assert types.index("checkpoint") < types.index("tool")  # 点在改动前
+    assert len(s.checkpoints) == 1
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hi"
+
+
+def test_checkpoint_one_per_turn(tmp_path):
+    """一轮多次改动只打一个点;下一轮再改又打一个(每轮一个)。"""
+    _init_git(tmp_path)
+    s, _ = _session(
+        tmp_path,
+        [_tc("write_file", {"path": "a.txt", "content": "1"}, "c1"),
+         _tc("write_file", {"path": "b.txt", "content": "2"}, "c2"),
+         _answer("两个都写了"),
+         _tc("write_file", {"path": "c.txt", "content": "3"}, "c3"),
+         _answer("又写了一个")],
+        checkpoint=True,
+    )
+    ev1 = _collect(s.run("写 a 和 b"))
+    assert [e["type"] for e in ev1].count("checkpoint") == 1   # 一轮一个
+    assert len(s.checkpoints) == 1
+    ev2 = _collect(s.continue_("再写 c"))
+    assert [e["type"] for e in ev2].count("checkpoint") == 1   # 这一轮也一个
+    assert len(s.checkpoints) == 2                             # 累计两个
+
+
+def test_checkpoint_non_git_warns_but_proceeds(tmp_path):
+    """非 git 目录开了检查点:改文件那轮打点失败 → 出 info 警告,但改动
+    照常完成,不再像旧版那样整轮 error。"""
+    s, _ = _session(
+        tmp_path,
+        [_tc("write_file", {"path": "a.txt", "content": "hi"}),
+         _answer("写好了")],
+        checkpoint=True,
+    )
+    events = _collect(s.run("写 a.txt"))
+    assert events[-1]["type"] == "done"
+    assert not any(e["type"] == "checkpoint" for e in events)
+    assert any(e["type"] == "info" and "检查点失败" in e.get("content", "")
+               for e in events)
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hi"
+    assert s.checkpoints == []
 
 
 def test_checkpoint_off_works_anywhere(tmp_path):
@@ -242,6 +296,77 @@ def test_checkpoint_off_works_anywhere(tmp_path):
     events = _collect(s.run("随便"))
     assert events[-1]["type"] == "done"
     assert not any(e["type"] == "checkpoint" for e in events)
+
+
+def test_checkpoints_persist_and_reload(tmp_path):
+    """checkpoints 列表 + checkpoint_enabled 跨'重启'持久化恢复。"""
+    _init_git(tmp_path)
+    store = MemoryStore()
+    scope = DirScope(cwd=str(tmp_path), allowed_roots=[str(tmp_path)])
+    s1 = AgentSession(
+        provider=ScriptedProvider(
+            [_tc("write_file", {"path": "a.txt", "content": "1"}),
+             _answer("done")]),
+        registry=ToolRegistry(scope), store=store,
+        confirm_policy=RiskyConfirmPolicy("none"), checkpoint=True)
+    _collect(s1.run("写 a"))
+    assert len(s1.checkpoints) == 1
+    saved = store.load(s1.id)
+    assert saved["checkpoints"] == s1.checkpoints
+    assert saved["checkpoint_enabled"] is True
+    # 重启载回:两者都恢复(纯聊天会话没点,但 enabled 仍要续上)
+    s2 = AgentSession.load(
+        s1.id, provider=ScriptedProvider([_answer("hi")]),
+        registry=ToolRegistry(scope), store=store,
+        confirm_policy=RiskyConfirmPolicy("none"),
+        checkpoint=bool(saved.get("checkpoint_enabled")))
+    assert s2 is not None
+    assert s2.checkpoints == s1.checkpoints
+    assert s2.checkpoint_enabled is True
+
+
+def test_excluded_tool_is_blocked_from_execution(tmp_path):
+    """被 exclude 的工具:模型即便调用也不执行,回一条『不可用』错误。
+    (exclude = 禁止执行,不只是不告诉模型 —— 纵深防御)"""
+    s, _ = _session(
+        tmp_path,
+        [_tc("write_file", {"path": "a.txt", "content": "x"}),
+         _answer("行")],
+        checkpoint=False,
+    )
+    events = _collect(s.run("写 a", exclude_tools={"write_file"}))
+    assert not (tmp_path / "a.txt").exists()        # 没真执行
+    assert any(e["type"] == "result"
+               and isinstance(e.get("result"), dict)
+               and "不可用" in str(e["result"].get("error", ""))
+               for e in events)
+    assert events[-1]["type"] == "done"
+
+
+def test_no_double_checkpoint_across_awaiting_restart(tmp_path):
+    """一轮内先打了点 A → 第二个工具需确认 → awaiting 落盘 → '重启'载回 →
+    批准续跑:不能再打第二个点(_turn_checkpointed 已持久化恢复)。"""
+    _init_git(tmp_path)
+    store = MemoryStore()
+    scope = DirScope(cwd=str(tmp_path), allowed_roots=[str(tmp_path)])
+    s1 = AgentSession(
+        provider=ScriptedProvider(
+            [_tc("write_file", {"path": "a.txt", "content": "1"}, "c1"),
+             _tc("run_command", {"command": "echo hi"}, "c2")]),
+        registry=ToolRegistry(scope), store=store,
+        confirm_policy=RiskyConfirmPolicy("risky"), checkpoint=True)
+    ev1 = _collect(s1.run("写 a 再跑命令"))
+    assert ev1[-1]["type"] == "confirm" and s1.status == "awaiting"
+    assert len(s1.checkpoints) == 1                 # 只打了 A
+    # "重启":全新对象从 store 载回(_turn_checkpointed 应一并恢复)
+    s2 = AgentSession.load(
+        s1.id, provider=ScriptedProvider([_answer("done")]),
+        registry=ToolRegistry(scope), store=store,
+        confirm_policy=RiskyConfirmPolicy("risky"), checkpoint=True)
+    assert s2 is not None and s2._turn_checkpointed is True
+    ev2 = _collect(s2.respond(approve=True))
+    assert ev2[-1]["type"] == "done"
+    assert len(s2.checkpoints) == 1                 # 仍只有 A,没多打 B
 
 
 # ---------- 取消 ----------

@@ -2,7 +2,7 @@
 // 以根目录为工作基地,工具常驻,纯聊天 = 零工具轮;读全盘自由,根外写
 // 操作后端会弹确认;根目录是 git 仓库则自动有检查点/回滚。
 // delta/reasoning 是流式瞬时事件(打字机),answer 是最终落 transcript 的回答。
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   agentRollback,
   agentStop,
@@ -213,17 +213,17 @@ export default function ChatPage({
     );
   }
 
-  async function doRollback() {
+  async function doRollback(to?: string) {
     if (!runIdRef.current) return;
-    if (
-      !confirm(
-        "确认回滚？将 git reset --hard 到本次会话开始的检查点，" +
-          "根目录未提交的改动会丢失。"
-      )
-    )
-      return;
-    const r = await agentRollback(runIdRef.current);
-    alert(r.error ? "回滚失败：" + r.error : "已回滚到检查点");
+    const msg = to
+      ? "回滚到这个检查点？会 git reset --hard 到此处——这之后(含本轮)" +
+        "对根目录的改动都会被丢弃。根目录外的文件不受影响。"
+      : "回滚到最早的检查点？会 git reset --hard 撤掉本会话对根目录的" +
+        "所有改动。根目录外的文件不受影响。";
+    if (!confirm(msg)) return;
+    const r = await agentRollback(runIdRef.current, to);
+    if (r.error) alert("回滚失败：" + r.error);
+    else alert("已回滚到检查点 " + (r.rolled_back_to || "").slice(0, 8));
   }
 
   const noWs = !ws || !ws.cwd;
@@ -272,8 +272,12 @@ export default function ChatPage({
             🌐 联网{webOn ? "·开" : "·关"}
           </button>
           {runId && hasCheckpoint && (
-            <button className="danger" onClick={doRollback}>
-              回滚检查点
+            <button
+              className="danger"
+              onClick={() => doRollback()}
+              title="回到最早的检查点:撤掉本会话对根目录的所有改动"
+            >
+              全部回滚
             </button>
           )}
         </div>
@@ -290,7 +294,7 @@ export default function ChatPage({
       )}
 
       <div className="agent-body">
-        <div className="msgs">
+        <div className="chat-thread">
           {initLoading && (
             <div className="loading-row">
               <span className="spinner" />
@@ -303,57 +307,43 @@ export default function ChatPage({
               工具。涉及桌面/下载等其他位置直接说;根目录外的改动会先问你。
             </div>
           )}
-          {events.map((e, i) => (
-            <EventRow key={i} e={e} />
-          ))}
-          {(liveThink || liveText) && (
-            <div className="ev ev-ans">
-              {liveThink && (
-                <details className="think" open={!liveText}>
-                  <summary>💭 思考过程</summary>
-                  <div className="think-body">{liveThink}</div>
-                </details>
-              )}
-              {liveText && <Markdown text={liveText} live />}
-            </div>
-          )}
-          {status === "running" && !liveText && !liveThink && (
-            <div
-              className="muted"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                fontSize: 12,
-              }}
-            >
-              <span
-                className="spinner"
-                style={{ width: 11, height: 11, borderWidth: 2 }}
+          {buildTurns(events).map((t, i) =>
+            t.kind === "me" ? (
+              <div key={i} className="turn me">
+                <div className="avatar">我</div>
+                <div className="bubble">{t.content}</div>
+              </div>
+            ) : (
+              <AiTurn
+                key={i}
+                evs={t.evs}
+                live={t.last ? { text: liveText, think: liveThink } : null}
+                running={!!t.last && status === "running"}
+                toolRunning={!!t.last && toolRunning}
+                lastToolName={lastEv?.name}
+                onRollback={doRollback}
               />
-              {toolRunning
-                ? lastEv?.name === "run_command"
-                  ? "命令运行中,可能需要一会儿…"
-                  : "工具执行中…"
-                : "AI 思考中…"}
-            </div>
+            )
           )}
           {status === "awaiting" && (
-            <div className="confirm-box">
-              <div className="confirm-title">
-                ⚠️ 操作待确认：<b>{events[events.length - 1]?.tool}</b>
-                (可改参数 JSON)
-              </div>
-              <textarea
-                className="sys-area"
-                value={editArgs}
-                onChange={(e) => setEditArgs(e.target.value)}
-              />
-              <div className="cfg-actions">
-                <button onClick={() => respond(true)}>批准并执行</button>
-                <button className="danger" onClick={() => respond(false)}>
-                  拒绝
-                </button>
+            <div className="turn ai">
+              <div className="avatar">AI</div>
+              <div className="confirm-box" style={{ flex: 1 }}>
+                <div className="confirm-title">
+                  ⚠️ 操作待确认：<b>{events[events.length - 1]?.tool}</b>
+                  (可改参数 JSON)
+                </div>
+                <textarea
+                  className="sys-area"
+                  value={editArgs}
+                  onChange={(e) => setEditArgs(e.target.value)}
+                />
+                <div className="cfg-actions">
+                  <button onClick={() => respond(true)}>批准并执行</button>
+                  <button className="danger" onClick={() => respond(false)}>
+                    拒绝
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -392,53 +382,190 @@ export default function ChatPage({
   );
 }
 
-function EventRow({ e }: { e: AgentEvent }) {
-  if (e.type === "user")
-    return (
-      <div className="ev ev-user">
-        <span className="role">你</span>
-        <span style={{ whiteSpace: "pre-wrap" }}>{e.content}</span>
-      </div>
-    );
-  if (e.type === "checkpoint")
-    return (
-      <div className="ev ev-cp">
-        🛟 已打 git 检查点 {String(e.commit).slice(0, 8)}（可随时回滚）
-      </div>
-    );
-  if (e.type === "tool")
-    return (
-      <div className="ev ev-tool">
-        ▶ 调用 <b>{e.name}</b>
-        <pre>{JSON.stringify(e.args, null, 2)}</pre>
-      </div>
-    );
-  if (e.type === "result") {
-    const r = e.result as Record<string, unknown>;
-    const err = r && (r as { error?: string }).error;
-    return (
-      <div className={"ev ev-res" + (err ? " err" : "")}>
-        {err ? "✖ " : "✓ "}
-        {e.name}
-        <pre>{JSON.stringify(e.result, null, 2).slice(0, 4000)}</pre>
-      </div>
-    );
+// 把扁平事件流按「用户一条 → AI 一轮」分组成聊天气泡。
+// delta/reasoning 是瞬时流(不在 events 里),这里只处理落库事件。
+type Turn =
+  | { kind: "me"; content: string; last?: boolean }
+  | { kind: "ai"; evs: AgentEvent[]; last?: boolean };
+
+function buildTurns(events: AgentEvent[]): Turn[] {
+  const turns: Turn[] = [];
+  let ai: Extract<Turn, { kind: "ai" }> | null = null;
+  for (const e of events) {
+    if (e.type === "delta" || e.type === "reasoning") continue;
+    if (e.type === "user") {
+      turns.push({ kind: "me", content: e.content || "" });
+      ai = { kind: "ai", evs: [] };
+      turns.push(ai);
+    } else {
+      if (!ai) {
+        ai = { kind: "ai", evs: [] };
+        turns.push(ai);
+      }
+      ai.evs.push(e);
+    }
   }
-  if (e.type === "answer")
-    return (
-      <div className="ev ev-ans">
-        <Markdown text={e.content || ""} />
-      </div>
+  // 标记最后一个 AI 轮:它来挂流式缓冲 + 心跳 spinner
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].kind === "ai") {
+      turns[i].last = true;
+      break;
+    }
+  }
+  return turns;
+}
+
+function argPreview(args?: Record<string, unknown>): string {
+  if (!args) return "";
+  const p = args.path as string | undefined;
+  if (p) return p.split(/[\\/]/).pop() || "";
+  if (typeof args.command === "string") return args.command.slice(0, 48);
+  if (typeof args.query === "string") return args.query.slice(0, 32);
+  if (typeof args.pattern === "string") return args.pattern.slice(0, 32);
+  return "";
+}
+
+// 一次工具调用 = 折叠卡片(摘要一行,点开看参数/结果)。
+function ToolChip({
+  tool,
+  result,
+}: {
+  tool: AgentEvent | null;
+  result: AgentEvent | null;
+}) {
+  const name = tool?.name || result?.name || "工具";
+  const err = !!(result?.result as { error?: string } | undefined)?.error;
+  const running = !!tool && !result;
+  const preview = argPreview(tool?.args);
+  return (
+    <details className={"tool-chip" + (err ? " err" : "")}>
+      <summary>
+        {running ? (
+          <span className="spinner spin-dot" />
+        ) : (
+          <span>{err ? "✖" : "✓"}</span>
+        )}
+        <span>
+          <b>{name}</b>
+          {preview && <span className="muted"> {preview}</span>}
+          {running && <span className="muted"> · 执行中…</span>}
+        </span>
+      </summary>
+      <pre>
+        {tool ? "参数 " + JSON.stringify(tool.args) + "\n" : ""}
+        {result
+          ? "结果 " + JSON.stringify(result.result).slice(0, 3000)
+          : running
+            ? "(执行中…)"
+            : ""}
+      </pre>
+    </details>
+  );
+}
+
+// AI 的一轮:气泡里依次是检查点标记 / 折叠工具 / 思考 / 回答。
+function AiTurn({
+  evs,
+  live,
+  running,
+  toolRunning,
+  lastToolName,
+  onRollback,
+}: {
+  evs: AgentEvent[];
+  live: { text: string; think: string } | null;
+  running: boolean;
+  toolRunning: boolean;
+  lastToolName?: string;
+  onRollback: (commit: string) => void;
+}) {
+  const nodes: ReactNode[] = [];
+  for (let i = 0; i < evs.length; i++) {
+    const e = evs[i];
+    if (e.type === "tool") {
+      const next = evs[i + 1];
+      const res = next && next.type === "result" ? next : null;
+      if (res) i++;
+      nodes.push(<ToolChip key={i} tool={e} result={res} />);
+    } else if (e.type === "result") {
+      nodes.push(<ToolChip key={i} tool={null} result={e} />);
+    } else if (e.type === "checkpoint") {
+      const commit = String(e.commit);
+      nodes.push(
+        <div key={i} className="cp-line">
+          🛟 检查点 {commit.slice(0, 8)}
+          <button
+            onClick={() => onRollback(commit)}
+            title="git reset --hard 回到此检查点(撤掉这一轮及之后的改动)"
+          >
+            回滚到这里
+          </button>
+        </div>
+      );
+    } else if (e.type === "info") {
+      nodes.push(
+        <div key={i} className="muted" style={{ fontSize: 12 }}>
+          {e.content}
+        </div>
+      );
+    } else if (e.type === "answer") {
+      nodes.push(<Markdown key={i} text={e.content || ""} />);
+    } else if (e.type === "error") {
+      nodes.push(
+        <div key={i} style={{ color: "var(--err)" }}>
+          ⚠️ {e.error}
+        </div>
+      );
+    } else if (e.type === "cancelled") {
+      nodes.push(
+        <div key={i} className="muted" style={{ fontSize: 12 }}>
+          — 已停止 —
+        </div>
+      );
+    }
+    // done / todos / confirm:不在气泡里渲染
+  }
+  if (live?.think)
+    nodes.push(
+      <details key="lt" className="think bubble-think" open={!live.text}>
+        <summary>💭 思考过程</summary>
+        <div className="think-body">{live.think}</div>
+      </details>
     );
-  if (e.type === "error")
-    return <div className="ev ev-err">出错：{e.error}</div>;
-  if (e.type === "cancelled")
-    return <div className="ev ev-done">— 已停止 —</div>;
-  if (e.type === "done") return <div className="ev ev-done">— 本轮结束 —</div>;
-  if (e.type === "info")
-    return <div className="ev ev-info">{e.content}</div>;
-  // todos 事件不直接渲染到主流;走右侧面板
-  return null;
+  if (live?.text) nodes.push(<Markdown key="ld" text={live.text} live />);
+
+  const showSpin = running && !live?.text && !live?.think;
+  if (nodes.length === 0 && !showSpin) return null;
+
+  return (
+    <div className="turn ai">
+      <div className="avatar">AI</div>
+      <div className="bubble">
+        {nodes}
+        {showSpin && (
+          <div
+            className="muted"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 12,
+            }}
+          >
+            <span
+              className="spinner"
+              style={{ width: 11, height: 11, borderWidth: 2 }}
+            />
+            {toolRunning
+              ? lastToolName === "run_command"
+                ? "命令运行中,可能需要一会儿…"
+                : "工具执行中…"
+              : "思考中…"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function TodoPanel({ todos }: { todos: TodoItem[] }) {

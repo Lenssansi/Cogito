@@ -11,7 +11,8 @@ done / error / cancelled。
 - 传 on_confirm 异步回调("单流式"):遇确认 → 吐 confirm 事件后 await 回调,
   按返回 bool 继续,一条流到底。适合 CLI / 简单宿主。
 
-其余可注入/可开关:checkpoint(git 安全网,默认开;非 git 目录可关)、
+其余可注入/可开关:checkpoint(git 安全网,默认开,**懒打**——本轮第一次改
+动前才打、一轮一个,纯聊天不打;非 git 目录可关)、
 nudge(反"只说不做"自动续刀,默认开)、exclude_tools(按轮隐藏工具,如
 联网开关)。
 """
@@ -23,7 +24,7 @@ import re
 import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from .confirm import RiskyConfirmPolicy
+from .confirm import MUTATING_PATH_ARGS, RiskyConfirmPolicy
 from .store import MemoryStore
 from .tools import ToolRegistry
 from .types import ConfirmPolicy, Provider, SessionStore
@@ -34,6 +35,11 @@ _TRIM = ".,;:!?)】」』\"'“”‘’《》)"
 
 _PREAMBLE_HEADS = ("我们先", "我先", "我会", "让我先", "让我", "先来",
                    "先看", "先定位", "先分析", "先检查", "先读")
+
+# 「改动类」工具(复用 RootConfirmPolicy 同一份清单,自动同步):本轮**第一次**
+# 执行其中之一前,自动打一个 git 检查点(懒打)。纯聊天/只读轮不含这些工具 →
+# 不打点;一轮最多一个点。撤销 = git reset --hard 到该点 = 撤掉这一整轮的改动。
+MUTATING_TOOLS = frozenset(MUTATING_PATH_ARGS)
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是一个本地编程/文件 Agent,只能在授权范围内操作。用提供的工具完成"
@@ -124,12 +130,13 @@ class AgentSession:
         self.status = "ready"  # ready|running|awaiting|done|error|cancelled
         self.title = ""
         self.meta: dict[str, Any] = {}
-        self.checkpoint_commit: str | None = None
+        self.checkpoints: list[str] = []  # 本会话已打的检查点 commit(按时间)
         self._batch: list[dict] = []
         self._bi = 0
         self._exclude: set[str] = set()
         self._nudged = False
         self._cancelled = False
+        self._turn_checkpointed = False  # 本轮是否已打过点(懒打,一轮一个)
 
     # ---------- 持久化 ----------
 
@@ -160,9 +167,16 @@ class AgentSession:
         s.status = data.get("status", "done")
         s.title = data.get("title", "")
         s.meta = dict(data.get("meta") or {})
-        s.checkpoint_commit = data.get("checkpoint")
+        cps = data.get("checkpoints")
+        if cps is None:  # 兼容旧档:单个 checkpoint 标量 → 收成列表
+            old = data.get("checkpoint")
+            cps = [old] if old else []
+        s.checkpoints = list(cps)
         s._batch = list(data.get("batch") or [])
         s._bi = int(data.get("bi") or 0)
+        # 与 batch/bi 同属「本轮进行中」状态:awaiting 期间重启续跑要恢复它,
+        # 否则同一轮会重复打检查点(违反一轮一个)。
+        s._turn_checkpointed = bool(data.get("turn_checkpointed"))
         s._exclude = set(data.get("exclude_tools") or [])
         registry.todos = list(data.get("todos") or [])
         return s
@@ -171,13 +185,15 @@ class AgentSession:
         self.store.save(self.id, {
             "title": self.title or "(未命名)",
             "cwd": self.registry.scope.cwd,
-            "checkpoint": self.checkpoint_commit,
+            "checkpoints": self.checkpoints,
+            "checkpoint_enabled": self.checkpoint_enabled,
             "messages": self.messages,
             "transcript": self.transcript,
             "status": self.status,
             "todos": self.registry.todos,
             "batch": self._batch,
             "bi": self._bi,
+            "turn_checkpointed": self._turn_checkpointed,
             "exclude_tools": sorted(self._exclude),
             "meta": self.meta,
         })
@@ -216,6 +232,7 @@ class AgentSession:
         self._exclude = set(exclude_tools or ())
         self._nudged = False
         self._cancelled = False
+        self._turn_checkpointed = False
         self.status = "running"
         self._persist()
         async for ev in self._drive():
@@ -280,6 +297,7 @@ class AgentSession:
         self._exclude = set(exclude_tools or ())
         self._nudged = False
         self._cancelled = False
+        self._turn_checkpointed = False
         self.status = "running"
         self._persist()
         async for ev in self._drive():
@@ -300,19 +318,8 @@ class AgentSession:
             self._persist()
             return
 
-        # 任务开始打 git 检查点(可选,仅一次)
-        if self.checkpoint_enabled and self.checkpoint_commit is None:
-            cp = self.registry.run("git_checkpoint",
-                                   {"message": "agent 会话起点"})
-            if "error" in cp:
-                self.status = "error"
-                yield self._rec({"type": "error",
-                                 "error": f"无法建检查点:{cp['error']}"})
-                self._persist()
-                return
-            self.checkpoint_commit = cp["checkpoint"]
-            yield self._rec({"type": "checkpoint", "commit": cp["checkpoint"]})
-
+        # 检查点改为「懒打」:见下方循环——本轮第一次执行改动类工具前才打,
+        # 纯聊天/只读轮不打点(不再污染 git 历史,也不再有空检查点)。
         while True:
             if self._cancelled:
                 self.status = "cancelled"
@@ -323,6 +330,18 @@ class AgentSession:
             # 1) 处理当前 batch 里未完成的 tool_call
             while self._bi < len(self._batch):
                 c = self._batch[self._bi]
+                # 被排除的工具 = **禁止执行**(不只是不告诉模型)。模型若凭直觉
+                # 调了未 advertise 的工具(被隐藏的 git_checkpoint/git_rollback、
+                # 或联网关闭时的 web_search),直接挡掉并回报,绝不真执行。
+                if c["name"] in self._exclude:
+                    err = {"error": f"工具不可用(未启用):{c['name']}"}
+                    yield self._rec({"type": "result", "name": c["name"],
+                                     "result": err})
+                    self.messages.append({
+                        "role": "tool", "tool_call_id": c["id"],
+                        "content": json.dumps(err, ensure_ascii=False)})
+                    self._bi += 1
+                    continue
                 if (self.confirm.needs_confirm(
                         c["name"], self.registry.is_high_risk(c["name"]),
                         args=c["arguments"])
@@ -351,6 +370,24 @@ class AgentSession:
                     content = ("用户拒绝执行该操作。请换一种安全的方式"
                                "或询问用户。")
                 else:
+                    # 懒检查点:本轮第一次真正执行「改动类」工具前,打一个
+                    # git 点(确认通过、即将执行时才打;被拒的操作不打)。
+                    # 纯聊天/只读轮永远进不到这里 → 不打点;一轮最多一个。
+                    if (self.checkpoint_enabled
+                            and not self._turn_checkpointed
+                            and c["name"] in MUTATING_TOOLS):
+                        self._turn_checkpointed = True  # 先置位:失败也不重试
+                        cp = self.registry.run(
+                            "git_checkpoint", {"message": "cogito 检查点"})
+                        if "error" in cp:
+                            yield self._rec({
+                                "type": "info",
+                                "content": "⚠️ 打 git 检查点失败,本轮改动"
+                                           "没有回滚点:" + cp["error"]})
+                        else:
+                            self.checkpoints.append(cp["checkpoint"])
+                            yield self._rec({"type": "checkpoint",
+                                             "commit": cp["checkpoint"]})
                     yield self._rec({"type": "tool", "name": c["name"],
                                      "args": c["arguments"]})
                     res = self.registry.run(c["name"], c["arguments"])

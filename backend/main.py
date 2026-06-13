@@ -281,6 +281,7 @@ class AgentContinue(BaseModel):
 
 class AgentRollback(BaseModel):
     run_id: str
+    to: str | None = None  # 回滚目标检查点 commit;不传=回到最早的点
 
 
 class AgentStop(BaseModel):
@@ -815,7 +816,7 @@ def agent_rollback_ep(
     body: AgentRollback,
     caller: Caller = Depends(require_permission("agent")),  # noqa: ARG001
 ) -> dict:
-    return agent_rollback(body.run_id)
+    return agent_rollback(body.run_id, body.to)
 
 
 @app.post("/api/agent/stop")
