@@ -120,6 +120,95 @@ class OpenAICompatProvider:
         except httpx.RequestError as e:
             raise ProviderError(f"网络错误:连不上 {self.base_url}({e})") from e
 
+    async def stream_tool_complete(
+        self, messages: list[dict], tools: list[dict]
+    ) -> AsyncIterator[tuple[str, Any]]:
+        """流式的带工具补全(stream:true + tools)。
+
+        逐段产出 ("reasoning"|"answer", 文本增量),最后产出
+        ("final", {content, tool_calls}) —— 与 tool_complete 返回同构,
+        供 Agent 循环边逐 token 透出、边收完整结果。
+        tool_calls 在增量协议里按 index 分片到达(id/name 先到,
+        arguments 字符串分片续到),这里负责拼装。
+        """
+        if not self.api_key:
+            raise ProviderError("未配置 API key")
+        url = _normalize_base(self.base_url) + "/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            **({"tools": tools} if tools else {}),
+            **self.extra_body,
+        }
+        content_parts: list[str] = []
+        calls_acc: dict[int, dict[str, str]] = {}
+        last_usage = None
+        try:
+            async with self._client(
+                httpx.Timeout(120.0, connect=10.0)
+            ) as client:
+                async with client.stream(
+                    "POST", url,
+                    headers={"Authorization": f"Bearer {self.api_key}",
+                             "Content-Type": "application/json"},
+                    json=payload,
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = (await resp.aread()).decode("utf-8", "replace")
+                        raise ProviderError(
+                            f"上游返回 {resp.status_code}:{body[:500]}"
+                        )
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        if obj.get("usage"):
+                            last_usage = obj["usage"]
+                        choices = obj.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        rc = delta.get("reasoning_content")
+                        if rc:
+                            yield ("reasoning", rc)
+                        piece = delta.get("content")
+                        if piece:
+                            content_parts.append(piece)
+                            yield ("answer", piece)
+                        for tc in delta.get("tool_calls") or []:
+                            idx = int(tc.get("index") or 0)
+                            slot = calls_acc.setdefault(
+                                idx, {"id": "", "name": "", "arguments": ""})
+                            if tc.get("id"):
+                                slot["id"] = tc["id"]
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                slot["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                slot["arguments"] += fn["arguments"]
+        except httpx.RequestError as e:
+            raise ProviderError(f"网络错误:{e}") from e
+        self._record(last_usage)
+        calls = []
+        for idx in sorted(calls_acc):
+            c = calls_acc[idx]
+            try:
+                args = json.loads(c["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            calls.append({"id": c["id"], "name": c["name"],
+                          "arguments": args})
+        yield ("final", {"content": "".join(content_parts),
+                         "tool_calls": calls})
+
     async def tool_complete(
         self, messages: list[dict], tools: list[dict]
     ) -> dict:

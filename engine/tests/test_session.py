@@ -362,6 +362,45 @@ def test_run_from_confirm_then_respond(tmp_path):
     assert not (tmp_path / "x.txt").exists()
 
 
+# ---------- 流式 provider:循环逐 token 透出 ----------
+
+class ScriptedStreamingProvider:
+    """有 stream_tool_complete 的脚本化 provider:每轮按预排事件吐。"""
+
+    def __init__(self, turns: list[list[tuple]]) -> None:
+        self.turns = list(turns)
+
+    async def stream_tool_complete(self, messages, tools):
+        for ev in self.turns.pop(0):
+            yield ev
+
+    async def tool_complete(self, messages, tools):  # 不应被调用
+        raise AssertionError("有流式能力时循环应走 stream_tool_complete")
+
+
+def test_session_streams_deltas_with_streaming_provider(tmp_path):
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    scope = DirScope(cwd=str(tmp_path), allowed_roots=[str(tmp_path)])
+    prov = ScriptedStreamingProvider([
+        [("final", _tc("read_file", {"path": "a.txt"}))],     # 第一轮:调工具
+        [("reasoning", "想想"), ("answer", "读"), ("answer", "完了"),
+         ("final", _answer("读完了"))],                        # 第二轮:流式作答
+    ])
+    s = AgentSession(provider=prov, registry=ToolRegistry(scope),
+                     store=MemoryStore(), checkpoint=False)
+    events = _collect(s.run("读 a.txt"))
+    # 增量事件逐段透出
+    assert [e["content"] for e in events if e["type"] == "delta"] == \
+        ["读", "完了"]
+    assert any(e["type"] == "reasoning" for e in events)
+    # 最终 answer/done 仍在(老消费者不受影响)
+    assert events[-2] == {"type": "answer", "content": "读完了"}
+    assert events[-1]["type"] == "done"
+    # delta/reasoning 是瞬时事件,不进 transcript(不膨胀持久化)
+    assert not any(e["type"] in ("delta", "reasoning") for e in s.transcript)
+    assert any(e["type"] == "answer" for e in s.transcript)
+
+
 # ---------- provider 出错 ----------
 
 def test_provider_exception_becomes_error_event(tmp_path):

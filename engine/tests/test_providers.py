@@ -167,6 +167,96 @@ def test_get_provider_rejects_unknown_format():
         get_provider(_cfg(format="some-unknown"))
 
 
+# ---------- stream_tool_complete(流式 + 工具)----------
+
+def _sse_bytes(*objs) -> bytes:
+    out = b""
+    for o in objs:
+        out += b"data: " + json.dumps(o).encode("utf-8") + b"\n\n"
+    return out + b"data: [DONE]\n\n"
+
+
+def test_stream_tool_complete_assembles_fragmented_tool_call():
+    """tool_calls 的 arguments 按增量分片到达,须按 index 拼装成完整 JSON。"""
+    sse = _sse_bytes(
+        {"choices": [{"delta": {"role": "assistant", "tool_calls": [
+            {"index": 0, "id": "call_1", "type": "function",
+             "function": {"name": "read_file", "arguments": ""}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"pa'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": 'th": "a.txt"}'}}]}}]},
+        {"choices": [{"delta": {}}], "usage": {"total_tokens": 7}},
+    )
+    usage_calls: list = []
+    prov = OpenAICompatProvider(
+        _cfg(), on_usage=lambda pid, n, u: usage_calls.append(u),
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, content=sse)),
+    )
+
+    async def collect():
+        return [e async for e in
+                prov.stream_tool_complete([{"role": "user", "content": "x"}],
+                                          [{"type": "function"}])]
+
+    events = asyncio.run(collect())
+    kind, final = events[-1]
+    assert kind == "final"
+    assert final["tool_calls"] == [
+        {"id": "call_1", "name": "read_file", "arguments": {"path": "a.txt"}}]
+    assert usage_calls == [{"total_tokens": 7}]
+
+
+def test_stream_tool_complete_streams_text_and_reasoning():
+    sse = _sse_bytes(
+        {"choices": [{"delta": {"reasoning_content": "想"}}]},
+        {"choices": [{"delta": {"content": "你"}}]},
+        {"choices": [{"delta": {"content": "好"}}]},
+    )
+    prov = OpenAICompatProvider(
+        _cfg(), transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, content=sse)),
+    )
+
+    async def collect():
+        return [e async for e in
+                prov.stream_tool_complete([{"role": "user", "content": "x"}],
+                                          [])]
+
+    events = asyncio.run(collect())
+    assert ("reasoning", "想") in events
+    assert [p for k, p in events if k == "answer"] == ["你", "好"]
+    kind, final = events[-1]
+    assert kind == "final"
+    assert final["content"] == "你好" and final["tool_calls"] == []
+
+
+def test_stream_tool_complete_parallel_calls_and_bad_json():
+    sse = _sse_bytes(
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c0",
+             "function": {"name": "a", "arguments": '{"k": 1}'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 1, "id": "c1",
+             "function": {"name": "b", "arguments": "{oops"}}]}}]},
+    )
+    prov = OpenAICompatProvider(
+        _cfg(), transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, content=sse)),
+    )
+
+    async def collect():
+        return [e async for e in
+                prov.stream_tool_complete([{"role": "user", "content": "x"}],
+                                          [])]
+
+    _, final = asyncio.run(collect())[-1]
+    assert [c["name"] for c in final["tool_calls"]] == ["a", "b"]   # 按 index 有序
+    assert final["tool_calls"][0]["arguments"] == {"k": 1}
+    assert final["tool_calls"][1]["arguments"] == {}                # 坏 JSON 容错
+
+
 # ---------- stream_chat(流式)----------
 
 def test_stream_chat_yields_reasoning_and_answer_and_records_usage():

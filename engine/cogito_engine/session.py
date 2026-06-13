@@ -362,10 +362,26 @@ class AgentSession:
                 })
                 self._bi += 1
 
-            # 2) batch 处理完,问模型下一步
+            # 2) batch 处理完,问模型下一步。provider 有流式能力则边走边吐
+            #    delta/reasoning 增量事件(瞬时,不进 transcript),否则整轮拿。
+            specs = self.registry.specs(exclude=self._exclude)
+            streamer = getattr(prov, "stream_tool_complete", None)
             try:
-                resp = await prov.tool_complete(
-                    self.messages, self.registry.specs(exclude=self._exclude))
+                if streamer is None:
+                    resp = await prov.tool_complete(self.messages, specs)
+                else:
+                    resp = None
+                    async for kind, payload in streamer(self.messages, specs):
+                        if kind == "answer":
+                            yield {"type": "delta", "content": payload}
+                        elif kind == "reasoning":
+                            yield {"type": "reasoning", "content": payload}
+                        elif kind == "final":
+                            resp = payload
+                        if self._cancelled:
+                            break
+                    if resp is None and not self._cancelled:
+                        raise RuntimeError("流式响应未完成(缺 final)")
             except Exception as e:  # noqa: BLE001
                 self.status = "error"
                 yield self._rec({"type": "error",
