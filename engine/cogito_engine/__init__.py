@@ -7,7 +7,7 @@
 
 from .types import ConfirmPolicy, Provider, Scope, SessionStore
 from .scope import AllowAllScope, DirScope
-from .confirm import RiskyConfirmPolicy
+from .confirm import RiskyConfirmPolicy, RootConfirmPolicy
 from .store import MemoryStore
 from .tools import ToolError, ToolRegistry
 from .session import AgentSession, DEFAULT_SYSTEM_PROMPT
@@ -28,6 +28,7 @@ __all__ = [
     "DirScope",
     "AllowAllScope",
     "RiskyConfirmPolicy",
+    "RootConfirmPolicy",
     "MemoryStore",
     "ToolRegistry",
     "ToolError",

@@ -1,12 +1,10 @@
-// 左侧栏:顶部页签 + 下方按当前页的历史列表(对话/编程会话)
-// 设计参考 Claude Desktop —— Tab 切换 + 当前 Tab 对应历史下方展示
-import type { AgentSessionSummary, ConvSummary, WhoAmI } from "../api";
+// 左侧栏:顶部页签 + 会话历史(对话=Agent,单一列表)
+import type { AgentSessionSummary, WhoAmI } from "../api";
 
-export type Page = "chat" | "agent" | "api" | "settings";
+export type Page = "chat" | "api" | "settings";
 
 const NAV: { key: Page; label: string }[] = [
   { key: "chat", label: "对话" },
-  { key: "agent", label: "编程" },
   { key: "api", label: "API 管理" },
   { key: "settings", label: "设置" },
 ];
@@ -14,11 +12,6 @@ const NAV: { key: Page; label: string }[] = [
 export default function Sidebar({
   page,
   onPage,
-  convList,
-  activeConvId,
-  onSelectConv,
-  onNewConv,
-  onDeleteConv,
   sessionList,
   activeSessionId,
   onSelectSession,
@@ -30,11 +23,6 @@ export default function Sidebar({
 }: {
   page: Page;
   onPage: (p: Page) => void;
-  convList: ConvSummary[];
-  activeConvId: string | null;
-  onSelectConv: (id: string) => void;
-  onNewConv: () => void;
-  onDeleteConv: (id: string) => void;
   sessionList: AgentSessionSummary[];
   activeSessionId: string | null;
   onSelectSession: (id: string) => void;
@@ -44,8 +32,6 @@ export default function Sidebar({
   who: WhoAmI | null;
   version: string;
 }) {
-  const showHistory = page === "chat" || page === "agent";
-
   return (
     <nav className="sidebar">
       <div className="brand">
@@ -64,59 +50,16 @@ export default function Sidebar({
         ))}
       </div>
 
-      {showHistory && <div className="sidebar-sep" />}
+      {page === "chat" && <div className="sidebar-sep" />}
 
       {page === "chat" && (
         <div className="hist-block">
           <div className="hist-head">
-            <span className="hist-title">对话历史</span>
-            <button
-              className="hist-new"
-              onClick={onNewConv}
-              title="开始新对话"
-            >
-              ＋
-            </button>
-          </div>
-          <div className="hist-list">
-            {convList.length ? (
-              convList.map((c) => (
-                <div
-                  key={c.id}
-                  className={
-                    "hist-item" + (activeConvId === c.id ? " active" : "")
-                  }
-                  onClick={() => onSelectConv(c.id)}
-                >
-                  <div className="hist-title-row">{c.title || "(无标题)"}</div>
-                  <button
-                    className="hist-del"
-                    title="删除"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (confirm(`删除「${c.title || c.id}」?`))
-                        onDeleteConv(c.id);
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-              ))
-            ) : (
-              <div className="hist-empty">还没有对话,「＋」开一个</div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {page === "agent" && (
-        <div className="hist-block">
-          <div className="hist-head">
-            <span className="hist-title">编程会话</span>
+            <span className="hist-title">会话历史</span>
             <button
               className="hist-new"
               onClick={onNewSession}
-              title="开始新编程会话"
+              title="开始新会话"
             >
               ＋
             </button>
@@ -165,7 +108,6 @@ export default function Sidebar({
 }
 
 function shortenPath(p: string): string {
-  // D:\foo\bar\very\deep\proj → D:\…\proj 当太长
   if (!p) return "";
   if (p.length <= 28) return p;
   const norm = p.replace(/\\/g, "/");
@@ -189,7 +131,7 @@ function StatusLine({
       <span className="status err">
         后端未连接
         <br />
-        <span style={{ fontSize: 11 }}>先跑 开发启动.bat</span>
+        <span style={{ fontSize: 11 }}>先跑 start-dev.bat</span>
       </span>
     );
   return (

@@ -91,18 +91,6 @@ DEFAULTS: dict[str, Any] = {
         "api_key": "",
         "max_results": 5,
     },
-    "brain": {
-        "auto_route": True,    # 本地模型自动选 API
-        "local_answer": True,  # 琐碎问题本地直答
-        "summary": True,       # 长对话滚动摘要
-        "summary_threshold": 20,  # 历史消息数超过则摘要更早的部分
-        # 大脑后端:local=本地 Ollama(免费但效果一般);cloud=用某个 provider
-        # 的某个 preset 充当大脑(便宜云端 Flash 类模型 ¥1-2/月即可,效果
-        # 明显好于本地 3B)
-        "backend": "local",
-        "cloud_provider_id": "",
-        "cloud_preset_label": "",
-    },
 }
 
 
@@ -480,7 +468,7 @@ def _preset_in(prov: dict, label: str) -> dict | None:
 
 def resolve_tool_capable() -> tuple[dict[str, Any] | None, str]:
     """选一个支持工具调用的 provider+preset:
-    优先 active(如果支持) → 否则若 auto_route 开,选支持工具的其它 provider
+    优先 active(如果支持) → 否则自动兜底到支持工具的其它 provider
     (优先本地模型) → 否则返回错误字符串。返回 (resolved, error_msg)。"""
     r = get_active_resolved()
     if not r:
@@ -491,14 +479,7 @@ def resolve_tool_capable() -> tuple[dict[str, Any] | None, str]:
         ps = _preset_in(prov, r.get("preset_label", ""))
         if ps is None or ps.get("supports_tools", True):
             return r, ""
-    # 当前不支持工具,需要 fallback
-    if not s.get("brain", {}).get("auto_route", True):
-        return None, (
-            "当前预设(可能是思考模式)不支持工具调用。"
-            "请在设置页启用「自动路由」,或换一个支持工具的预设/"
-            "添加本地模型(如 Ollama)。"
-        )
-    # 找候选:不同于当前的 provider,有任一预设 supports_tools != false
+    # 当前不支持工具(如思考模式) → 找候选:有任一预设 supports_tools != false
     cur_id = r.get("provider_id", "")
     candidates: list[tuple[int, str, str]] = []  # (优先级, pid, label)
     for p in s["providers"]:
@@ -541,31 +522,6 @@ def is_aggregator(base_url: str) -> bool:
     return any(k in host for k in _AGGREGATOR_HOSTS)
 
 
-def providers_for_router() -> list[dict[str, Any]]:
-    """给路由器看的精简清单（无密钥）。聚合器的 presets 仅返已置顶的。"""
-    s = load_settings()
-    out = []
-    for p in s["providers"]:
-        agg = is_aggregator(p.get("base_url", ""))
-        presets_full = p.get("presets", [])
-        if agg:
-            allowed = [x for x in presets_full if x.get("pinned")]
-        else:
-            allowed = presets_full
-        out.append({
-            "id": p["id"],
-            "name": p.get("name", ""),
-            "capability": p.get("capability", ""),
-            "has_key": bool(p.get("api_key")),
-            "aggregator": agg,
-            "presets": [
-                {"label": x["label"], "description": x.get("description", "")}
-                for x in allowed
-            ],
-        })
-    return out
-
-
 def get_ollama() -> dict[str, Any]:
     return load_settings()["ollama"]
 
@@ -577,31 +533,6 @@ def set_ollama(patch: dict[str, Any]) -> dict[str, Any]:
         if k in patch and patch[k]:
             cur[k] = patch[k]
     s["ollama"] = cur
-    save_settings(s)
-    return cur
-
-
-def get_brain() -> dict[str, Any]:
-    return load_settings()["brain"]
-
-
-def set_brain(patch: dict[str, Any]) -> dict[str, Any]:
-    s = load_settings()
-    cur = dict(s.get("brain", {}))
-    for k in ("auto_route", "local_answer", "summary"):
-        if k in patch and patch[k] is not None:
-            cur[k] = bool(patch[k])
-    if isinstance(patch.get("summary_threshold"), int):
-        cur["summary_threshold"] = max(6, patch["summary_threshold"])
-    if "backend" in patch and patch["backend"]:
-        b = str(patch["backend"]).lower()
-        if b in ("local", "cloud"):
-            cur["backend"] = b
-    if "cloud_provider_id" in patch and patch["cloud_provider_id"] is not None:
-        cur["cloud_provider_id"] = str(patch["cloud_provider_id"])
-    if "cloud_preset_label" in patch and patch["cloud_preset_label"] is not None:
-        cur["cloud_preset_label"] = str(patch["cloud_preset_label"])
-    s["brain"] = cur
     save_settings(s)
     return cur
 

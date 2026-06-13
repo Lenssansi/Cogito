@@ -40,9 +40,14 @@ class Scope(Protocol):
 
 @runtime_checkable
 class ConfirmPolicy(Protocol):
-    """某个高危工具执行前要不要弹用户确认。"""
+    """某个工具执行前要不要弹用户确认。
 
-    def needs_confirm(self, tool_name: str, high_risk: bool) -> bool: ...
+    args 是该次调用的工具参数 —— 位置感知策略(如 RootConfirmPolicy:
+    根外改动永远确认)靠它判断操作发生在哪;不需要的实现忽略即可。
+    """
+
+    def needs_confirm(self, tool_name: str, high_risk: bool,
+                      args: dict | None = None) -> bool: ...
 
 
 @runtime_checkable

@@ -261,16 +261,20 @@ class AgentSession:
                           exclude_tools: set[str] | None
                           ) -> AsyncIterator[dict]:
         extras = _extract_paths(task)
+        # 只对"确实需要放行"的路径做临时授权提示(全盘 Scope 下本就可达,
+        # 不发提示、也不给模型拼授权前言,避免噪音)
+        needs_grant = [p for p in extras
+                       if not self.registry.scope.is_allowed(p)]
         self.registry.scope.grant_temporary(extras)  # 覆盖式:每轮一批
-        augmented = _augment_task_with_extras(task, extras)
+        augmented = _augment_task_with_extras(task, needs_grant)
         self.messages.append({"role": "user", "content": augmented})
         if not self.title:
             self.title = task.strip()[:40] or "(未命名)"
         yield self._rec({"type": "user", "content": task})
-        if extras:
+        if needs_grant:
             yield self._rec({"type": "info",
                              "content": "本轮临时授权访问: "
-                                        + ", ".join(extras)})
+                                        + ", ".join(needs_grant)})
         self._batch = []
         self._bi = 0
         self._exclude = set(exclude_tools or ())
@@ -320,7 +324,8 @@ class AgentSession:
             while self._bi < len(self._batch):
                 c = self._batch[self._bi]
                 if (self.confirm.needs_confirm(
-                        c["name"], self.registry.is_high_risk(c["name"]))
+                        c["name"], self.registry.is_high_risk(c["name"]),
+                        args=c["arguments"])
                         and not c.get("_decided")):
                     yield self._rec({"type": "confirm", "tool": c["name"],
                                      "args": c["arguments"],

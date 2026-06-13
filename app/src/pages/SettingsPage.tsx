@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
-import BrainBackendPanel from "../components/BrainBackendPanel";
 import ComponentsPanel from "../components/ComponentsPanel";
 import SearchPanel from "../components/SearchPanel";
 import {
-  getBrain,
-  getOllamaStatus,
   getSystemPrompt,
   getSkills,
   getWorkspace,
@@ -21,16 +18,13 @@ import {
   type GitStatusResp,
   type ProxyInfo,
   gitInitWorkspace,
-  saveBrain,
   saveWorkspace,
   setSkills,
   setSystemPrompt as apiSetSysPrompt,
   setTheme as apiSetTheme,
   getConfirmLevel,
   setConfirmLevel as apiSetConfirmLevel,
-  type BrainCfg,
   type ConfirmLevel,
-  type OllamaStatus,
   type ThemeMode,
   type SkillsStatus,
   type WhoAmI,
@@ -69,37 +63,6 @@ export default function SettingsPage({
   const [confirmLv, setConfirmLv] = useState<ConfirmLevel>("risky");
   const [cfMsg, setCfMsg] = useState("");
 
-  const [ost, setOst] = useState<OllamaStatus | null>(null);
-  const [oBase, setOBase] = useState("");
-  const [oModel, setOModel] = useState("");
-  // 本地模型:多地址/多模型,持久到 localStorage
-  const [addrList, setAddrList] = useState<string[]>(() => {
-    try {
-      return JSON.parse(
-        localStorage.getItem("aih.local.addrs") || "[]"
-      ) as string[];
-    } catch {
-      return [];
-    }
-  });
-  const [modelsByAddr, setModelsByAddr] = useState<Record<string, string[]>>(
-    () => {
-      try {
-        return (JSON.parse(
-          localStorage.getItem("aih.local.models") || "{}"
-        ) || {}) as Record<string, string[]>;
-      } catch {
-        return {};
-      }
-    }
-  );
-  const [addrEditing, setAddrEditing] = useState(false);
-  const [newAddr, setNewAddr] = useState("");
-  const [modelEditing, setModelEditing] = useState(false);
-  const [newModel, setNewModel] = useState("");
-  const [brain, setBrain] = useState<BrainCfg | null>(null);
-  const [bMsg, setBMsg] = useState("");
-
   const [wsc, setWsc] = useState<WorkspaceCfg | null>(null);
   const [newRoot, setNewRoot] = useState("");
   const [wsMsg, setWsMsg] = useState("");
@@ -122,17 +85,6 @@ export default function SettingsPage({
   const [proxy, setProxy] = useState<ProxyInfo | null>(null);
   const [proxyMsg, setProxyMsg] = useState("");
 
-  async function refreshOllama() {
-    try {
-      const s = await getOllamaStatus();
-      setOst(s);
-      setOBase(s.config.base_url);
-      setOModel(s.config.model);
-    } catch {
-      /* ignore */
-    }
-  }
-
   useEffect(() => {
     getSystemPrompt()
       .then((r) => setSys(r.system_prompt))
@@ -146,16 +98,12 @@ export default function SettingsPage({
     getProxyInfo()
       .then(setProxy)
       .catch(() => void 0);
-    getBrain()
-      .then((r) => setBrain(r.brain))
-      .catch(() => void 0);
     getWorkspace()
       .then(setWsc)
       .catch(() => void 0);
     getSkills()
       .then(setSk)
       .catch(() => void 0);
-    refreshOllama();
   }, []);
 
   async function saveWs(next: Partial<WorkspaceCfg>) {
@@ -198,24 +146,6 @@ export default function SettingsPage({
       setSysMsg("保存失败（远程不可改设置，仅本机可改）");
     }
   }
-
-  async function saveB(next: Partial<BrainCfg>, ollama?: boolean) {
-    setBMsg("");
-    try {
-      const r = await saveBrain({
-        brain: next,
-        ollama: ollama ? { base_url: oBase, model: oModel } : undefined,
-      });
-      setBrain(r.brain);
-      setBMsg("已保存");
-      if (ollama) refreshOllama();
-    } catch {
-      setBMsg("保存失败（远程不可改设置，仅本机可改）");
-    }
-  }
-
-  const tog = (k: keyof BrainCfg) =>
-    brain && saveB({ [k]: !brain[k] } as Partial<BrainCfg>);
 
   return (
     <div className="page">
@@ -355,197 +285,15 @@ export default function SettingsPage({
         )}
       </section>
 
-      <section className="set-block">
-        <div className="set-title">
-          本地模型{" "}
-          <span
-            className={
-              "dot " +
-              (ost === null ? "wait" : ost.reachable ? "ok" : "err")
-            }
-          />
-          {ost === null
-            ? "检测中…"
-            : ost.reachable
-            ? "在线"
-            : "离线(请确认本地模型服务已启动)"}
-        </div>
-        <label>
-          地址(可保存多个,下拉切换)
-          {addrEditing ? (
-            <div className="preset-row">
-              <input
-                value={newAddr}
-                onChange={(e) => setNewAddr(e.target.value)}
-                placeholder="http://localhost:1234 或 http://127.0.0.1:11434"
-              />
-              <button
-                onClick={() => {
-                  const v = newAddr.trim();
-                  if (!v) return;
-                  const next = Array.from(new Set([...addrList, v]));
-                  setAddrList(next);
-                  localStorage.setItem(
-                    "aih.local.addrs",
-                    JSON.stringify(next)
-                  );
-                  setOBase(v);
-                  setAddrEditing(false);
-                  setNewAddr("");
-                }}
-              >
-                确认
-              </button>
-              <button
-                onClick={() => {
-                  setAddrEditing(false);
-                  setNewAddr("");
-                }}
-              >
-                取消
-              </button>
-            </div>
-          ) : (
-            <select
-              value={oBase}
-              disabled={!canSettings}
-              onChange={(e) => {
-                if (e.target.value === "__add__") {
-                  setAddrEditing(true);
-                  setNewAddr("");
-                } else {
-                  setOBase(e.target.value);
-                }
-              }}
-            >
-              {Array.from(
-                new Set([...addrList, oBase].filter(Boolean))
-              ).map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-              <option value="__add__">＋ 添加新地址…</option>
-            </select>
-          )}
-        </label>
-        <label>
-          模型(可保存多个,下拉切换)
-          {modelEditing ? (
-            <div className="preset-row">
-              <input
-                value={newModel}
-                onChange={(e) => setNewModel(e.target.value)}
-                placeholder="例如 qwen2.5:7b / llama3.1:8b"
-              />
-              <button
-                onClick={() => {
-                  const v = newModel.trim();
-                  if (!v) return;
-                  const cur = modelsByAddr[oBase] || [];
-                  const nextList = Array.from(new Set([...cur, v]));
-                  const next = { ...modelsByAddr, [oBase]: nextList };
-                  setModelsByAddr(next);
-                  localStorage.setItem(
-                    "aih.local.models",
-                    JSON.stringify(next)
-                  );
-                  setOModel(v);
-                  setModelEditing(false);
-                  setNewModel("");
-                }}
-              >
-                确认
-              </button>
-              <button
-                onClick={() => {
-                  setModelEditing(false);
-                  setNewModel("");
-                }}
-              >
-                取消
-              </button>
-            </div>
-          ) : (
-            <select
-              value={oModel}
-              disabled={!canSettings}
-              onChange={(e) => {
-                if (e.target.value === "__add__") {
-                  setModelEditing(true);
-                  setNewModel("");
-                } else {
-                  setOModel(e.target.value);
-                }
-              }}
-            >
-              {Array.from(
-                new Set([
-                  ...(modelsByAddr[oBase] || []),
-                  ...(ost?.models || []),
-                  oModel,
-                ].filter(Boolean))
-              ).map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-              <option value="__add__">＋ 添加新模型…</option>
-            </select>
-          )}
-        </label>
-        {canSettings && (
-          <div className="cfg-actions">
-            <button onClick={() => saveB({}, true)}>保存并测试连接</button>
-            <button onClick={refreshOllama}>刷新状态</button>
-            <span className="cfg-msg">{bMsg}</span>
-          </div>
-        )}
-      </section>
-
-      <section className="set-block">
-        <div className="set-title">本地模型职责</div>
-        {brain ? (
-          <div className="toggles">
-            <Toggle
-              on={brain.auto_route}
-              label="自动任务路由（本地模型按各 API「擅长描述」选最合适的）"
-              onClick={() => tog("auto_route")}
-              disabled={!canSettings}
-            />
-            <Toggle
-              on={brain.local_answer}
-              label="琐碎问题本地直答（省云端额度）"
-              onClick={() => tog("local_answer")}
-              disabled={!canSettings}
-            />
-            <Toggle
-              on={brain.summary}
-              label="长对话滚动摘要（防超上下文）"
-              onClick={() => tog("summary")}
-              disabled={!canSettings}
-            />
-            <div className="muted" style={{ marginTop: 6 }}>
-              关掉「自动路由」则始终用对话页手动选的 API。
-            </div>
-          </div>
-        ) : (
-          <div className="muted">加载中…</div>
-        )}
-        <BrainBackendPanel
-          brain={brain}
-          onBrainChange={setBrain}
-          canSettings={canSettings}
-        />
-      </section>
 
       <SearchPanel canSettings={canSettings} />
 
       <section className="set-block">
-        <div className="set-title">编程 Agent 工作区</div>
+        <div className="set-title">会话工作区</div>
         <div className="muted" style={{ marginBottom: 8 }}>
-          Agent 只能在「授权根目录」内读写，越界硬禁止。当前工作目录须是其中
-          某个目录、且为 git 仓库（用于检查点/回滚）。
+          「当前工作目录」是会话的根目录(工作基地):读/搜全盘自由,
+          但根目录之外的写/删/命令永远先弹确认。根目录是 git 仓库时
+          自动有检查点/回滚安全网(非 git 也能用,只是没有安全网)。
         </div>
         {/* Git 检测:没装就引导安装 */}
         {gitSt && !gitSt.installed && canSettings && (

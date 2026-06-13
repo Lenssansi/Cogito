@@ -30,9 +30,7 @@ from config import (
     PROJECT_ROOT,
     delete_provider,
     get_active_resolved,
-    get_brain,
     get_confirm_level,
-    get_ollama,
     get_system_prompt,
     get_theme,
     load_settings,
@@ -40,9 +38,7 @@ from config import (
     get_skills_enabled,
     get_workspace,
     set_active,
-    set_brain,
     set_confirm_level,
-    set_ollama,
     set_skills_enabled,
     set_system_prompt,
     set_theme,
@@ -52,28 +48,17 @@ from config import (
 from skills_loader import status as skills_status
 from agents import (
     agent_rollback,
+    agent_stop,
     agent_stream_continue,
     agent_stream_respond,
     agent_stream_start,
-    fs_stop_run,
-    fs_stream_respond,
-    fs_stream_start,
 )
-from brain import ollama_status, route, summarize
-from search import as_context, test_query as _search_test, web_search
+from local_models import ollama_status
+from search import test_query as _search_test
 from llm import build_provider
 from cogito_engine.providers import ProviderError
 from security import Caller, get_caller, require_permission
-from store import (
-    delete_agent,
-    delete_conv,
-    get_agent,
-    get_conv,
-    list_agent,
-    list_convs,
-    new_id,
-    upsert_conv,
-)
+from store import delete_agent, get_agent, list_agent
 
 APP_VERSION = "0.2.0-p2"
 
@@ -271,22 +256,6 @@ class SkillsPatch(BaseModel):
     enabled: bool
 
 
-class OllamaPatch(BaseModel):
-    base_url: str | None = None
-    model: str | None = None
-
-
-class BrainPatch(BaseModel):
-    auto_route: bool | None = None
-    local_answer: bool | None = None
-    summary: bool | None = None
-    summary_threshold: int | None = None
-    # 大脑后端:local=本地 Ollama;cloud=借用某 provider 的 preset
-    backend: str | None = None  # "local" | "cloud"
-    cloud_provider_id: str | None = None
-    cloud_preset_label: str | None = None
-
-
 class WorkspacePatch(BaseModel):
     allowed_roots: list[str] | None = None
     cwd: str | None = None
@@ -314,21 +283,8 @@ class AgentRollback(BaseModel):
     run_id: str
 
 
-class ChatfsStart(BaseModel):
-    messages: list[dict]
-    base: str = ""
-    mode: str = "file"  # file=全盘文件 / settings=改设置
-
-
-class ChatfsRespond(BaseModel):
+class AgentStop(BaseModel):
     run_id: str
-    approve: bool
-    edited_args: dict | None = None
-
-
-class ChatRequest(BaseModel):
-    messages: list[dict]  # [{role, content}, ...]，前端维护的规范历史
-    web: bool = False     # 开启则先联网搜索再作答
 
 
 @app.get("/api/providers")
@@ -763,43 +719,6 @@ def update_skills(
     return skills_status(get_skills_enabled())
 
 
-@app.get("/api/ollama/status")
-async def ollama_stat(
-    caller: Caller = Depends(get_caller),  # noqa: ARG001
-) -> dict:
-    s = await ollama_status()
-    s["config"] = get_ollama()
-    return s
-
-
-@app.get("/api/brain")
-def read_brain(caller: Caller = Depends(get_caller)) -> dict:  # noqa: ARG001
-    return {"brain": get_brain(), "ollama": get_ollama()}
-
-
-@app.post("/api/brain")
-def write_brain(
-    brain: BrainPatch | None = None,
-    ollama: OllamaPatch | None = None,
-    caller: Caller = Depends(require_permission("settings")),  # noqa: ARG001
-) -> dict:
-    b = set_brain(brain.model_dump(exclude_none=True)) if brain else get_brain()
-    o = set_ollama(ollama.model_dump(exclude_none=True)) if ollama \
-        else get_ollama()
-    return {"brain": b, "ollama": o}
-
-
-@app.post("/api/brain/test")
-async def brain_test_ep(
-    caller: Caller = Depends(get_caller),  # noqa: ARG001
-) -> dict:
-    """大脑后端综合自检:基础对话 / JSON 输出 / 工具调用(cloud 才测)。
-    每项 ok/detail + 总评 overall。本地 Ollama 模式不强求工具调用通过。"""
-    _local_only(caller)
-    from brain import test_backend
-    return await test_backend()
-
-
 def _ws_git(ws: dict) -> dict:
     cwd = ws.get("cwd", "")
     return {**ws, "cwd_is_git": bool(
@@ -899,263 +818,14 @@ def agent_rollback_ep(
     return agent_rollback(body.run_id)
 
 
-@app.post("/api/chatfs/start")
-async def chatfs_start(
-    body: ChatfsStart,
-    caller: Caller = Depends(get_caller),
-) -> StreamingResponse:
-    if caller.trust != "local":
-        raise HTTPException(status_code=403,
-                            detail="文件模式仅本机可用（远程已禁用）")
-    return StreamingResponse(
-        fs_stream_start(body.messages, body.base, body.mode),
-        media_type="text/event-stream",
-    )
-
-
-class ChatfsStop(BaseModel):
-    run_id: str
-
-
-@app.post("/api/chatfs/stop")
-def chatfs_stop(
-    body: ChatfsStop,
-    caller: Caller = Depends(get_caller),
+@app.post("/api/agent/stop")
+def agent_stop_ep(
+    body: AgentStop,
+    caller: Caller = Depends(require_permission("agent")),  # noqa: ARG001
 ) -> dict:
-    """停止指定 chatfs run。把它标 cancelled,并强制 kill 任何正在跑的子进程
-    —— 修复了「点停止后,subprocess.run 仍在跑直到超时,导致下次重新发消息
-    无法打开文件」的卡死问题。仅本机。"""
-    if caller.trust != "local":
-        raise HTTPException(status_code=403, detail="文件模式仅本机可用")
-    return {"ok": fs_stop_run(body.run_id)}
-
-
-@app.post("/api/chatfs/respond")
-async def chatfs_respond(
-    body: ChatfsRespond,
-    caller: Caller = Depends(get_caller),
-) -> StreamingResponse:
-    if caller.trust != "local":
-        raise HTTPException(status_code=403,
-                            detail="文件模式仅本机可用（远程已禁用）")
-    return StreamingResponse(
-        fs_stream_respond(body.run_id, body.approve, body.edited_args),
-        media_type="text/event-stream",
-    )
-
-
-@app.post("/api/chat")
-async def chat(
-    req: ChatRequest,
-    caller: Caller = Depends(require_permission("chat")),  # noqa: ARG001
-) -> StreamingResponse:
-    sys_prompt = get_system_prompt().strip()
-    brain = get_brain()
-    base_msgs = list(req.messages)
-
-    async def event_stream() -> AsyncIterator[bytes]:
-        msgs = list(base_msgs)
-
-        # 1) 长对话滚动摘要（本地模型，失败则跳过不影响对话）
-        thr = int(brain.get("summary_threshold", 20))
-        if brain.get("summary", True) and len(msgs) > thr:
-            keep = 8
-            summary = await summarize(msgs[:-keep])
-            msgs = msgs[-keep:]
-            if summary:
-                msgs = [{"role": "system",
-                         "content": f"（早前对话摘要）\n{summary}"}] + msgs
-
-        # 2) 全局系统提示词置最前
-        if sys_prompt:
-            msgs = [{"role": "system", "content": sys_prompt}] + msgs
-
-        last_user = next(
-            (m.get("content", "") for m in reversed(base_msgs)
-             if m.get("role") == "user"),
-            "",
-        )
-
-        # 2.5) 联网:先让云端模型自决「该不该搜+搜什么」(tool-calling),
-        #      思考模式回退到文本决策,均失败再兜底总搜。
-        did_search = False
-        results: list = []
-        query = last_user
-        if req.web and last_user:
-            decided = False
-            try:
-                resolved_d = get_active_resolved()
-                if resolved_d and resolved_d.get("api_key"):
-                    prov_d = build_provider(resolved_d)
-                    web_spec = {
-                        "type": "function",
-                        "function": {
-                            "name": "web_search",
-                            "description": ("Search the web. Call ONLY if the "
-                                            "user's question needs fresh / "
-                                            "external info you don't already "
-                                            "have."),
-                            "parameters": {
-                                "type": "object",
-                                "properties": {"query": {"type": "string"}},
-                                "required": ["query"],
-                            },
-                        },
-                    }
-                    try:
-                        d = await prov_d.tool_complete(msgs, [web_spec])
-                        for tc in d.get("tool_calls", []):
-                            args = tc.get("arguments") or {}
-                            q = (args.get("query") if isinstance(args, dict)
-                                 else "") or last_user
-                            results.extend(await web_search(q))
-                            query = q
-                            did_search = True
-                        decided = True  # 空 tool_calls = 模型判不需要搜
-                    except Exception:  # noqa: BLE001
-                        # 思考模式不支持 tools → 文本决策兜底
-                        dec_msgs = [
-                            {"role": "system",
-                             "content": ("严格只输出一行:用户消息若需联网才能"
-                                         "准确答 → 输出 SEARCH: <精炼关键词>;"
-                                         "否则 → 输出 NO。不要其它字。")},
-                            {"role": "user", "content": last_user},
-                        ]
-                        d2 = await prov_d.tool_complete(dec_msgs, [])
-                        txt = (d2.get("content") or "").strip()
-                        if txt.upper().startswith("SEARCH:"):
-                            query = txt.split(":", 1)[1].strip() or last_user
-                            results = await web_search(query)
-                            did_search = True
-                        decided = True
-            except Exception:  # noqa: BLE001
-                decided = False
-            if not decided:
-                results = await web_search(last_user)
-                did_search = True
-        if did_search:
-            wk = "一二三四五六日"[datetime.now().weekday()]
-            today = datetime.now().strftime("%Y-%m-%d")
-            block = [f"【系统提供的实时信息】今天是 {today}，星期{wk}"
-                     "（本机时区）。"]
-            if results:
-                block.append(as_context(results))
-            else:
-                block.append("（联网检索这次没返回结果。若问题依赖实时"
-                             "信息，请如实说明检索未果，不要编造。）")
-            block.append(
-                "要求：以上为系统已为你实时联网获取的信息，请直接据此"
-                "回答；严禁声称你无法联网或没有实时数据；严禁编造/给"
-                "模拟数据；涉及日期以上面给出的今天为准。\n\n用户的问题："
-                + last_user
-            )
-            pos = next(
-                (i for i in range(len(msgs) - 1, -1, -1)
-                 if msgs[i].get("role") == "user"),
-                None,
-            )
-            if pos is not None:
-                msgs[pos] = {"role": "user", "content": "\n".join(block)}
-            yield _sse({"web": len(results)})
-
-        # 3) 路由：本地模型决定本地直答 / 派给哪个云端 API
-        decision = await route(last_user, brain)
-        if decision is None:
-            resolved = get_active_resolved()
-            if resolved is None:
-                yield _sse({"error":
-                            "未配置任何 API，请到「API 管理」页添加并设为当前。"})
-                return
-            route_meta = {
-                "mode": "manual",
-                "name": f'{resolved["provider_name"]}·'
-                        f'{resolved["preset_label"]}',
-            }
-        elif decision["mode"] == "local":
-            oc = get_ollama()
-            resolved = {
-                "format": "openai_compat",
-                "base_url": oc["base_url"],
-                "api_key": "ollama",
-                "model": oc["model"],
-                "extra_body": {},
-            }
-            route_meta = {"mode": "local", "name": f'本地 {oc["model"]}',
-                          "reason": decision.get("reason", "")}
-        else:
-            resolved = decision["resolved"]
-            route_meta = {
-                "mode": "cloud",
-                "name": f'{resolved["provider_name"]}·'
-                        f'{resolved["preset_label"]}',
-                "reason": decision.get("reason", ""),
-            }
-
-        yield _sse({"route": route_meta})
-        provider = build_provider(resolved)
-        try:
-            async for kind, piece in provider.stream_chat(msgs):  # type: ignore[arg-type]
-                yield _sse(
-                    {"reasoning": piece} if kind == "reasoning"
-                    else {"delta": piece}
-                )
-            yield _sse({"done": True})
-        except ProviderError as e:
-            yield _sse({"error": str(e)})
-        except Exception as e:  # noqa: BLE001
-            yield _sse({"error": f"未预期错误：{e}"})
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-def _sse(obj: dict) -> bytes:
-    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8")
-
-
-# ===== 对话持久化（单用户；本地数据，远程亦可读写自己的历史）=====
-class ConvSave(BaseModel):
-    title: str = ""
-    messages: list[dict] = []
-    web: bool = False
-    file: bool = False
-
-
-@app.get("/api/conversations")
-def conversations(caller: Caller = Depends(get_caller)) -> list:  # noqa: ARG001
-    return list_convs()
-
-
-@app.post("/api/conversations")
-def create_conversation(
-    caller: Caller = Depends(get_caller),  # noqa: ARG001
-) -> dict:
-    return {"id": new_id()}
-
-
-@app.get("/api/conversations/{cid}")
-def read_conversation(
-    cid: str, caller: Caller = Depends(get_caller)  # noqa: ARG001
-) -> dict:
-    conv = get_conv(cid)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="对话不存在")
-    return conv
-
-
-@app.put("/api/conversations/{cid}")
-def save_conversation(
-    cid: str,
-    body: ConvSave,
-    caller: Caller = Depends(get_caller),  # noqa: ARG001
-) -> dict:
-    return upsert_conv(cid, body.title, body.messages, body.web, body.file)
-
-
-@app.delete("/api/conversations/{cid}")
-def remove_conversation(
-    cid: str, caller: Caller = Depends(get_caller)  # noqa: ARG001
-) -> dict:
-    return {"ok": delete_conv(cid)}
+    """停止会话:标 cancelled + 强杀正在跑的子进程(防 run_command 阻塞
+    到超时把会话卡死)。"""
+    return {"ok": agent_stop(body.run_id)}
 
 
 # 生产/浏览器访问：若前端已构建（app/dist），由后端直接托管。

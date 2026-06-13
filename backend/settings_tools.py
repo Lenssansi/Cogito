@@ -19,7 +19,6 @@ def get_settings_summary() -> dict[str, Any]:
     return {
         "theme": s.get("theme"),
         "confirm_level": config.get_confirm_level(),
-        "brain": config.get_brain(),
         "ollama": config.get_ollama(),
         "skills_enabled": config.get_skills_enabled(),
         "active": s.get("active"),
@@ -37,14 +36,6 @@ def set_theme(theme: str) -> dict:
 
 def set_confirm_level(level: str) -> dict:
     return {"confirm_level": config.set_confirm_level(level)}
-
-
-def set_brain(auto_route: bool | None = None, local_answer: bool | None = None,
-              summary: bool | None = None) -> dict:
-    patch = {k: v for k, v in {
-        "auto_route": auto_route, "local_answer": local_answer,
-        "summary": summary}.items() if v is not None}
-    return {"brain": config.set_brain(patch)}
 
 
 def set_ollama(base_url: str = "", model: str = "") -> dict:
@@ -111,7 +102,6 @@ REGISTRY = {
     "get_settings": (get_settings_summary, False),
     "set_theme": (set_theme, False),
     "set_confirm_level": (set_confirm_level, False),
-    "set_brain": (set_brain, False),
     "set_ollama": (set_ollama, False),
     "set_skills": (set_skills, False),
     "set_active": (set_active, False),
@@ -156,9 +146,6 @@ def tool_specs() -> list[dict[str, Any]]:
            "高危确认档 all(每个改动都确认)|risky(默认,仅删/跑命令/"
            "回滚/动安全边界确认)|none(全不确认)",
            {"level": {"type": S}}, ["level"]),
-        fn("set_brain", "本地大脑开关",
-           {"auto_route": {"type": B}, "local_answer": {"type": B},
-            "summary": {"type": B}}, []),
         fn("set_ollama", "Ollama 地址/模型",
            {"base_url": {"type": S}, "model": {"type": S}}, []),
         fn("set_skills", "写码 skills 开关",

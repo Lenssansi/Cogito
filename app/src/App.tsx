@@ -1,19 +1,15 @@
 import { useEffect, useState } from "react";
 import ChatPage from "./pages/ChatPage";
-import AgentPage from "./pages/AgentPage";
 import ApiPage from "./pages/ApiPage";
 import SettingsPage from "./pages/SettingsPage";
 import Sidebar, { type Page } from "./components/Sidebar";
 import {
   deleteAgentSession,
-  deleteConversation,
   getHealth,
   getTheme,
   getWhoAmI,
   listAgentSessions,
-  listConversations,
   type AgentSessionSummary,
-  type ConvSummary,
   type ThemeMode,
   type WhoAmI,
 } from "./api";
@@ -48,19 +44,10 @@ export default function App() {
   const [version, setVersion] = useState("");
   const [theme, setThemeState] = useState<ThemeMode>("dark");
 
-  // 历史列表(全局):Sidebar 和 Page 共用一份;Page 在持久化后通知 App 刷新
-  const [convList, setConvList] = useState<ConvSummary[]>([]);
-  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  // 会话历史(全局):Sidebar 和页面共用一份
   const [sessionList, setSessionList] = useState<AgentSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
-  async function refreshConvList() {
-    try {
-      setConvList(await listConversations());
-    } catch {
-      /* ignore */
-    }
-  }
   async function refreshSessionList() {
     try {
       setSessionList(await listAgentSessions());
@@ -83,7 +70,6 @@ export default function App() {
       } catch {
         setBackendOk(false);
       }
-      refreshConvList();
       refreshSessionList();
     })();
   }, []);
@@ -96,15 +82,6 @@ export default function App() {
     return () => mq.removeEventListener("change", fn);
   }, [theme]);
 
-  async function onDeleteConv(id: string) {
-    try {
-      await deleteConversation(id);
-    } catch {
-      /* ignore */
-    }
-    if (activeConvId === id) setActiveConvId(null);
-    refreshConvList();
-  }
   async function onDeleteSession(id: string) {
     try {
       await deleteAgentSession(id);
@@ -120,25 +97,14 @@ export default function App() {
       <Sidebar
         page={page}
         onPage={setPage}
-        convList={convList}
-        activeConvId={activeConvId}
-        onSelectConv={(id) => {
-          setPage("chat");
-          setActiveConvId(id);
-        }}
-        onNewConv={() => {
-          setPage("chat");
-          setActiveConvId(null);
-        }}
-        onDeleteConv={onDeleteConv}
         sessionList={sessionList}
         activeSessionId={activeSessionId}
         onSelectSession={(id) => {
-          setPage("agent");
+          setPage("chat");
           setActiveSessionId(id);
         }}
         onNewSession={() => {
-          setPage("agent");
+          setPage("chat");
           setActiveSessionId(null);
         }}
         onDeleteSession={onDeleteSession}
@@ -149,13 +115,6 @@ export default function App() {
       <main className="content">
         {page === "chat" && (
           <ChatPage
-            activeConvId={activeConvId}
-            onConvChange={setActiveConvId}
-            onListUpdate={refreshConvList}
-          />
-        )}
-        {page === "agent" && (
-          <AgentPage
             who={who}
             activeSessionId={activeSessionId}
             onSessionChange={setActiveSessionId}

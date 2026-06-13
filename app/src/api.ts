@@ -47,58 +47,6 @@ export interface ProvidersState {
   active: ActiveSel;
 }
 
-export interface RouteMeta {
-  mode: "manual" | "cloud" | "local";
-  name: string;
-  reason?: string;
-}
-
-export interface ChatMsg {
-  role: "user" | "assistant" | "system";
-  content: string;
-  reasoning?: string; // 思考过程（思考模型）
-  route?: RouteMeta; // 本次由谁回答（路由结果）
-  web?: number; // 本次联网搜索了几条
-  events?: AgentEvent[]; // 文件模式：本轮工具/结果流
-}
-
-export interface BrainCfg {
-  auto_route: boolean;
-  local_answer: boolean;
-  summary: boolean;
-  summary_threshold: number;
-  /** local=本地 Ollama;cloud=借用 provider 的 preset 当大脑(便宜 Flash 类) */
-  backend?: "local" | "cloud";
-  cloud_provider_id?: string;
-  cloud_preset_label?: string;
-}
-export interface BrainTestResult {
-  backend: string;
-  overall: "pass" | "fail";
-  checks: { name: string; ok: boolean; detail: string }[];
-}
-export interface OllamaCfg {
-  base_url: string;
-  model: string;
-}
-export interface OllamaStatus {
-  reachable: boolean;
-  models: string[];
-  model: string;
-  config: OllamaCfg;
-}
-
-export interface ConvSummary {
-  id: string;
-  title: string;
-  updated: number;
-}
-export interface Conversation extends ConvSummary {
-  messages: ChatMsg[];
-  web?: boolean;
-  file?: boolean;
-}
-
 export type ThemeMode = "dark" | "light" | "system";
 
 async function getJSON<T>(path: string): Promise<T> {
@@ -210,9 +158,9 @@ export const installGit = (url: string, install_dir: string) =>
     installer_log_tail?: string;
   }>("/api/git/install", "POST", { url, install_dir });
 
-/** 强制停止 chatfs 文件模式的 run(同时杀掉任何正在跑的子进程)。 */
-export const chatfsStop = (run_id: string) =>
-  sendJSON<{ ok: boolean }>("/api/chatfs/stop", "POST", { run_id });
+/** 停止统一会话的当前运行(标 cancelled + 杀正在跑的子进程)。 */
+export const agentStop = (run_id: string) =>
+  sendJSON<{ ok: boolean }>("/api/agent/stop", "POST", { run_id });
 
 // ---- 组件与更新 ----
 export interface ComponentsStatus {
@@ -339,6 +287,9 @@ export interface AgentEvent {
     | "result"
     | "confirm"
     | "answer"
+    | "delta"      // 流式回答增量(瞬时,不入 transcript)
+    | "reasoning"  // 流式思考增量(瞬时,不入 transcript)
+    | "cancelled"
     | "done"
     | "error"
     | "info"
@@ -402,21 +353,6 @@ export function streamSSE(
   return ac;
 }
 
-export const getOllamaStatus = () =>
-  getJSON<OllamaStatus>("/api/ollama/status");
-export const getBrain = () =>
-  getJSON<{ brain: BrainCfg; ollama: OllamaCfg }>("/api/brain");
-export const saveBrain = (body: {
-  brain?: Partial<BrainCfg>;
-  ollama?: Partial<OllamaCfg>;
-}) => sendJSON<{ brain: BrainCfg; ollama: OllamaCfg }>(
-  "/api/brain",
-  "POST",
-  body
-);
-export const testBrain = () =>
-  sendJSON<BrainTestResult>("/api/brain/test", "POST");
-
 // ---- 联网搜索(独立配置)----
 export interface SearchCfg {
   provider: string;
@@ -439,28 +375,6 @@ export const saveSearchCfg = (patch: {
 export const testSearch = (query = "ping") =>
   sendJSON<SearchTestResult>("/api/search/test", "POST", { query });
 
-export const listConversations = () =>
-  getJSON<ConvSummary[]>("/api/conversations");
-export const getConversation = (id: string) =>
-  getJSON<Conversation>(`/api/conversations/${id}`);
-export const createConversation = () =>
-  sendJSON<{ id: string }>("/api/conversations", "POST");
-export const saveConversation = (
-  id: string,
-  title: string,
-  messages: ChatMsg[],
-  web = false,
-  file = false
-) =>
-  sendJSON<Conversation>(`/api/conversations/${id}`, "PUT", {
-    title,
-    messages,
-    web,
-    file,
-  });
-export const deleteConversation = (id: string) =>
-  sendJSON<{ ok: boolean }>(`/api/conversations/${id}`, "DELETE");
-
 // 原生文件夹选择器（仅 Electron 外壳；远程浏览器没有这个能力）。
 export const hasNativePicker = (): boolean => {
   const w = window as unknown as { cogito?: { pickFolder?: unknown } };
@@ -473,65 +387,3 @@ export const pickFolder = async (): Promise<string> => {
   return w.cogito?.pickFolder ? await w.cogito.pickFolder() : "";
 };
 
-// 流式对话
-export function streamChat(
-  messages: ChatMsg[],
-  cb: {
-    onDelta: (s: string) => void;
-    onReasoning: (s: string) => void;
-    onRoute: (r: RouteMeta) => void;
-    onWeb: (n: number) => void;
-    onDone: () => void;
-    onError: (msg: string) => void;
-  },
-  web = false
-): AbortController {
-  const ac = new AbortController();
-  (async () => {
-    try {
-      const res = await fetch(backendBase + "/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ messages, web }),
-        signal: ac.signal,
-      });
-      if (!res.ok || !res.body) {
-        cb.onError(`请求失败 ${res.status}：${await res.text()}`);
-        return;
-      }
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith("data:")) continue;
-          const obj = JSON.parse(line.slice(5).trim());
-          if (obj.error) {
-            cb.onError(obj.error);
-            return;
-          }
-          if (obj.done) {
-            cb.onDone();
-            return;
-          }
-          if (obj.route) cb.onRoute(obj.route);
-          if (typeof obj.web === "number") cb.onWeb(obj.web);
-          if (obj.reasoning) cb.onReasoning(obj.reasoning);
-          if (obj.delta) cb.onDelta(obj.delta);
-        }
-      }
-      cb.onDone();
-    } catch (e) {
-      if ((e as Error).name !== "AbortError")
-        cb.onError(`网络错误：${(e as Error).message}`);
-    }
-  })();
-  return ac;
-}
