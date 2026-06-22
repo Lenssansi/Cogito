@@ -13,11 +13,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any, AsyncIterator
 
 import config
+import memory
+import memory_extract
 import store as appstore
 from cogito_engine import (
     AgentSession,
@@ -98,6 +101,58 @@ def _web_search_tool(query: str, n: int = 5) -> dict[str, Any]:
     return {"query": query, "results": results, "count": len(results)}
 
 
+def _register_memory_tools(reg: ToolRegistry, cwd: str) -> None:
+    """注册跨会话记忆工具。它们操作 ~/.cogito(绕过项目 scope,属系统能力);
+    非高危、不弹确认(写自己的记忆,像 Claude 写 memory 那样)。cwd 绑定本会话
+    根目录 → 决定写哪个项目的记忆。"""
+    S = {"type": "string"}
+
+    def _save(name: str, description: str, type: str = "project",
+              body: str = "") -> dict:
+        return memory.save_memory(cwd, name, description, type, body)
+
+    def _update(name: str, description: str = "", type: str = "",
+                body: str = "") -> dict:
+        return memory.update_memory(cwd, name, description, type, body)
+
+    reg.register("memory_save", _save, high_risk=False, spec={
+        "type": "function", "function": {
+            "name": "memory_save",
+            "description": "记一条跨会话记忆(学到持久且非显然的事才记;已有同"
+                           "一事用 memory_update;别记代码/git 里已有的)。",
+            "parameters": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "kebab-case 短 slug"},
+                "description": {"type": "string",
+                                "description": "一句话摘要,召回靠它,要写好"},
+                "type": {"type": "string",
+                         "description": "user|feedback|project|reference"},
+                "body": {"type": "string", "description": "事实正文"},
+            }, "required": ["name", "description", "body"]}}})
+    reg.register("memory_update", _update, high_risk=False, spec={
+        "type": "function", "function": {
+            "name": "memory_update",
+            "description": "更新已有记忆的字段(留空=不改)",
+            "parameters": {"type": "object", "properties": {
+                "name": S, "description": S, "type": S, "body": S,
+            }, "required": ["name"]}}})
+    reg.register("memory_delete",
+                 lambda name: memory.delete_memory(cwd, name),
+                 high_risk=False, spec={
+                     "type": "function", "function": {
+                         "name": "memory_delete",
+                         "description": "删除一条过时/错误的记忆",
+                         "parameters": {"type": "object", "properties":
+                                        {"name": S}, "required": ["name"]}}})
+    reg.register("memory_read",
+                 lambda name: memory.read_memory(cwd, name),
+                 high_risk=False, spec={
+                     "type": "function", "function": {
+                         "name": "memory_read",
+                         "description": "读一条记忆的全文(索引里看到、要细节时用)",
+                         "parameters": {"type": "object", "properties":
+                                        {"name": S}, "required": ["name"]}}})
+
+
 _SYS_UNIFIED = (
     "你是 Cogito,一个跑在用户本机的 AI 助手 + 编程/文件 Agent。"
     "你以一个**根目录**为工作基地(当前:{cwd}),用提供的工具完成任务;"
@@ -122,7 +177,7 @@ _SYS_UNIFIED = (
 )
 
 
-def _system_prompt(cwd: str, has_git: bool) -> str:
+def _system_prompt(cwd: str, has_git: bool, task: str = "") -> str:
     git_note = (
         "【安全网】你这一轮第一次改文件/跑命令前,系统会自动打一个 git "
         "检查点;用户可一键回滚你某一轮的改动——放手做,但仍要稳。"
@@ -136,6 +191,10 @@ def _system_prompt(cwd: str, has_git: bool) -> str:
     skills = build_injection(config.get_skills_enabled())
     if skills:
         sys_content = skills + "\n\n" + sys_content
+    # 记忆区(静态层 COGITO.md + 纪律 + 动态层索引/召回)追加到末尾
+    mem = memory.inject(cwd, task)
+    if mem:
+        sys_content = sys_content + "\n\n" + mem
     return sys_content
 
 
@@ -145,11 +204,72 @@ def _registry(cwd: str) -> ToolRegistry:
                        test_cmd=ws.get("test_cmd", ""))
     reg.register("web_search", _web_search_tool,
                  spec=_WEB_SEARCH_SPEC, high_risk=False)
+    _register_memory_tools(reg, cwd)
     return reg
 
 
 def _confirm_policy(cwd: str) -> RootConfirmPolicy:
     return RootConfirmPolicy(cwd, inner=ConfigConfirmPolicy())
+
+
+# 读类工具看 path 参数:读到子目录文件时,把该目录 COGITO.md + 命中的路径规则
+# 拼到工具结果末尾给模型看(静态层的"就近懒加载",对应 Claude Code 子目录 CLAUDE.md)
+_READ_TOOLS = {"read_file", "list_dir", "search_text"}
+
+
+def _make_context_hook(cwd: str):
+    loaded: set[str] = set()     # 本会话已注入过的子目录/规则,避免重复
+
+    def hook(name: str, args: dict, result: dict) -> str | None:
+        if name not in _READ_TOOLS:
+            return None
+        return memory.subdir_context(cwd, (args or {}).get("path"), loaded)
+
+    return hook
+
+
+# ---------- 自动记忆提炼(每轮后,与模型强弱无关地"自建"记忆)----------
+_extract_tasks: set = set()
+
+
+def _last_turn_excerpt(session: AgentSession) -> tuple[str, str, bool]:
+    """从 transcript 取最后一轮:原始用户文本 + 最终回答 + 是否用过工具。"""
+    tr = session.transcript
+    li = -1
+    for i in range(len(tr) - 1, -1, -1):
+        if tr[i].get("type") == "user":
+            li = i
+            break
+    if li < 0:
+        return "", "", False
+    seg = tr[li + 1:]
+    answer = ""
+    for ev in seg:
+        if ev.get("type") == "answer":
+            answer = ev.get("content") or ""
+    used_tools = any(ev.get("type") == "tool" for ev in seg)
+    return tr[li].get("content") or "", answer, used_tools
+
+
+def _schedule_extract(session: AgentSession) -> None:
+    """每轮结束后调度后台记忆提炼(过门控才跑;失败绝不影响主流程)。
+    强模型已可即时 memory_save,本步是让任何模型都自动建记忆的兜底。"""
+    try:
+        user_text, answer, used_tools = _last_turn_excerpt(session)
+        if not user_text or not memory_extract.worth_extracting(
+                user_text, answer, used_tools):
+            return
+        resolved = config.get_active_resolved()
+        if not resolved or not resolved.get("api_key"):
+            return
+        provider = build_provider(resolved)
+        root = session.registry.scope.cwd
+        t = asyncio.create_task(
+            memory_extract.run(root, user_text, answer, provider))
+        _extract_tasks.add(t)            # 持引用防 GC
+        t.add_done_callback(_extract_tasks.discard)
+    except Exception:  # noqa: BLE001 调度失败绝不影响主流程
+        pass
 
 
 # 活跃会话缓存(内存);不在则从 JSON 载回(后端重启后可继续)
@@ -171,6 +291,7 @@ def _get_agent_session(rid: str) -> AgentSession | None:
         # 会话当下还没有点,但续跑后真动文件时仍需要)。兼容旧档的标量字段。
         checkpoint=bool(data.get("checkpoint_enabled",
                                  data.get("checkpoint"))),
+        context_hook=_make_context_hook(cwd),
     )
     if s is not None:
         _AGENT_SESSIONS[rid] = s
@@ -202,7 +323,8 @@ async def agent_stream_start(task: str, web: bool = True
     session = AgentSession(
         provider=_tool_provider, registry=_registry(cwd),
         confirm_policy=_confirm_policy(cwd), store=_AGENT_STORE,
-        system_prompt=_system_prompt(cwd, has_git), checkpoint=has_git,
+        system_prompt=_system_prompt(cwd, has_git, task), checkpoint=has_git,
+        context_hook=_make_context_hook(cwd),
     )
     _AGENT_SESSIONS[session.id] = session
     yield _sse({"type": "run", "run_id": session.id})
@@ -212,6 +334,8 @@ async def agent_stream_start(task: str, web: bool = True
                                "回滚安全网(可在顶部初始化 git)"})
     async for ev in session.run(task, exclude_tools=_exclude_tools(web)):
         yield _sse(ev)
+    if session.status == "done":
+        _schedule_extract(session)
 
 
 async def agent_stream_respond(rid: str, approve: bool,
@@ -223,6 +347,8 @@ async def agent_stream_respond(rid: str, approve: bool,
         return
     async for ev in s.respond(approve, edited_args):
         yield _sse(ev)
+    if s.status == "done":
+        _schedule_extract(s)
 
 
 async def agent_stream_continue(rid: str, task: str, web: bool = True
@@ -236,6 +362,8 @@ async def agent_stream_continue(rid: str, task: str, web: bool = True
     s.registry.test_cmd = config.get_workspace().get("test_cmd", "")
     async for ev in s.continue_(task, exclude_tools=_exclude_tools(web)):
         yield _sse(ev)
+    if s.status == "done":
+        _schedule_extract(s)
 
 
 def agent_stop(rid: str) -> bool:

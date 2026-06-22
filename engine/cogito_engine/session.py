@@ -112,6 +112,7 @@ class AgentSession:
         checkpoint: bool = True,
         nudge: bool = True,
         on_confirm: ConfirmHook | None = None,
+        context_hook: Callable[[str, dict, dict], str | None] | None = None,
     ) -> None:
         self.registry = registry
         self.confirm = confirm_policy or RiskyConfirmPolicy()
@@ -121,6 +122,10 @@ class AgentSession:
         self.on_confirm = on_confirm
         self.checkpoint_enabled = checkpoint
         self.nudge_enabled = nudge
+        # 通用上下文钩子:每次工具执行后回调 (name, args, result),返回的文本
+        # 拼到该工具结果末尾给模型看。引擎不关心它做什么(宿主用来按需注入
+        # 子目录指令、路径规则等);默认 None=无行为,保持库通用。
+        self.context_hook = context_hook
 
         sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT.format(
             cwd=registry.scope.cwd)
@@ -152,6 +157,7 @@ class AgentSession:
         checkpoint: bool = True,
         nudge: bool = True,
         on_confirm: ConfirmHook | None = None,
+        context_hook: Callable[[str, dict, dict], str | None] | None = None,
     ) -> "AgentSession | None":
         """从 Store 载回会话(进程重启后续跑)。没有则返回 None。
         awaiting 状态连同待确认 batch 一起恢复,respond 仍可用。"""
@@ -161,7 +167,7 @@ class AgentSession:
         s = cls(provider=provider, registry=registry,
                 confirm_policy=confirm_policy, store=store,
                 session_id=session_id, checkpoint=checkpoint, nudge=nudge,
-                on_confirm=on_confirm)
+                on_confirm=on_confirm, context_hook=context_hook)
         s.messages = list(data.get("messages") or s.messages)
         s.transcript = list(data.get("transcript") or [])
         s.status = data.get("status", "done")
@@ -392,6 +398,14 @@ class AgentSession:
                                      "args": c["arguments"]})
                     res = self.registry.run(c["name"], c["arguments"])
                     content = json.dumps(res, ensure_ascii=False)[:8000]
+                    if self.context_hook:
+                        try:
+                            extra = self.context_hook(
+                                c["name"], c["arguments"], res)
+                        except Exception:  # noqa: BLE001
+                            extra = None
+                        if extra:
+                            content = content + "\n\n" + extra
                     yield self._rec({"type": "result", "name": c["name"],
                                      "result": res})
                     if c["name"] in ("todo_set", "todo_update") and \

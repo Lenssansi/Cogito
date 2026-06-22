@@ -27,6 +27,8 @@ settings.json.tmp
 1.txt
 *.local
 *.secret
+# 记忆机制的私有静态层(个人本机指令,不随仓库分发;项目根 COGITO.md 仍入库)
+COGITO.local.md
 
 # ── 打包产物 ────────────────────────────────────────────
 release/

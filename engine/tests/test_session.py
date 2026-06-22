@@ -369,6 +369,30 @@ def test_no_double_checkpoint_across_awaiting_restart(tmp_path):
     assert len(s2.checkpoints) == 1                 # 仍只有 A,没多打 B
 
 
+def test_context_hook_appends_to_tool_result(tmp_path):
+    """通用 context_hook:工具执行后回调,返回的文本拼到该工具结果末尾给模型。"""
+    scope = DirScope(cwd=str(tmp_path), allowed_roots=[str(tmp_path)])
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    seen: list[str] = []
+
+    def hook(name, args, result):
+        seen.append(name)
+        return "[注入:本目录指令]" if name == "read_file" else None
+
+    prov = ScriptedProvider([
+        _tc("read_file", {"path": "a.txt"}),
+        _answer("读完了"),
+    ])
+    s = AgentSession(provider=prov, registry=ToolRegistry(scope),
+                     store=MemoryStore(),
+                     confirm_policy=RiskyConfirmPolicy("none"),
+                     checkpoint=False, context_hook=hook)
+    _collect(s.run("读 a.txt"))
+    assert "read_file" in seen
+    tool_msgs = [m for m in s.messages if m.get("role") == "tool"]
+    assert any("[注入:本目录指令]" in m["content"] for m in tool_msgs)
+
+
 # ---------- 取消 ----------
 
 def test_cancel_before_tool_execution(tmp_path):
