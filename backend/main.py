@@ -73,6 +73,9 @@ app = FastAPI(title="Cogito", version=APP_VERSION)
 # 远程/跨站由下方 CSRF + 信任分级(security.py)挡;CORS 这里只让本体能读响应。
 app.add_middleware(
     CORSMiddleware,
+    # 打包版前端从 file:// 加载,跨域请求的 Origin 是字面 "null",必须显式放行,
+    # 否则装好的 app 会"连不上后端"。开发期是 http://127.0.0.1:<动态口>,走下面正则。
+    allow_origins=["null"],
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
