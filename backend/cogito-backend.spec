@@ -12,11 +12,13 @@ tmp_ret = collect_all('fastapi')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('pydantic')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('cogito_engine')   # 可编辑安装的引擎库,显式收进来(否则冻结后 import 不到)
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=['../engine'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

@@ -15,7 +15,7 @@
   "build": {
     "appId": "com.cogito.app",
     "productName": "Cogito",
-    "directories": { "output": "../release/v${version}" },
+    "directories": { "output": "../release/${version}" },
     "files": ["dist/**/*", "electron/**/*", "package.json"],
     "extraResources": [
       { "from": "../backend/dist/cogito-backend.exe",
@@ -24,7 +24,7 @@
         "filter": ["**/*", "!**/.git/**"] }
     ],
     "win": {
-      "target": ["nsis"],
+      "target": ["nsis", "zip"],
       "icon": "../assets/icon.ico"
     },
     "nsis": {
