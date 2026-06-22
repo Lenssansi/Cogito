@@ -60,7 +60,7 @@ from cogito_engine.providers import ProviderError
 from security import Caller, get_caller, require_permission
 from store import delete_agent, get_agent, list_agent
 
-APP_VERSION = "0.2.0-p2"
+APP_VERSION = "1.0.0"
 
 # 日志一次性初始化:5MB×2 滚动到 data/logs/cogito.log;接管 uvicorn
 import applog
