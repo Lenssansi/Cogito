@@ -68,13 +68,12 @@ applog.setup_logging()
 
 app = FastAPI(title="Cogito", version=APP_VERSION)
 
-# 开发期前端跑在 Vite(5173)，与后端(8756)跨端口，需放行本地源。
+# 开发期前端跑在 Vite(端口运行时动态分配),与后端(8756)跨端口,需放行本机源。
+# 放行任意 loopback 源(127.0.0.1 / localhost 任意端口)——后端只绑本机,真正的
+# 远程/跨站由下方 CSRF + 信任分级(security.py)挡;CORS 这里只让本体能读响应。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -91,13 +90,11 @@ app.add_middleware(
 #  1. 带 Electron 外壳注入的 X-Cogito-Shell 令牌(app 自身请求,启动时由
 #     Electron 主进程通过 onBeforeSendHeaders 注入,网页伪造不了)
 #  2. Origin 与本服务同源(Origin 的 host:port == Host 头)
-#  3. Origin 是开发期 Vite(5173)
+#  3. Origin 是本机 loopback(127.0.0.1 / localhost 任意端口,含运行时动态分配的 Vite)
 #  4. 无 Origin 且非浏览器跨站(curl/Cline 等原生客户端,本就不是 CSRF 媒介)
 _SHELL_TOKEN = os.environ.get("COGITO_SHELL_TOKEN", "")
 _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-_CSRF_DEV_ORIGINS = {
-    "http://localhost:5173", "http://127.0.0.1:5173",
-}
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def _csrf_ok(request: Request) -> bool:
@@ -108,12 +105,14 @@ def _csrf_ok(request: Request) -> bool:
             return True
     origin = request.headers.get("origin")
     if origin:
-        if origin in _CSRF_DEV_ORIGINS:
-            return True
         try:
-            o_netloc = (urlparse(origin).netloc or "").lower()
+            o = urlparse(origin)
         except ValueError:
             return False
+        # 本机 loopback 源(含运行时动态端口的 Vite)= 可信本体/开发源
+        if (o.hostname or "").lower() in _LOOPBACK_HOSTS:
+            return True
+        o_netloc = (o.netloc or "").lower()
         host = (request.headers.get("host") or "").lower()
         # 同源:Origin 的 host:port 与本服务 Host 一致(远程 LAN IP 也适用)
         if o_netloc and host and o_netloc == host:
