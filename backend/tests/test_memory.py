@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import memory
@@ -173,6 +174,90 @@ def test_subdir_context_outside_root(tmp_path, monkeypatch):
     root.mkdir()
     out = memory.subdir_context(str(root), str(tmp_path / "outside.txt"), set())
     assert out is None                              # root 之外 → 无子目录语义
+
+
+def test_save_records_dates(tmp_path, monkeypatch):
+    _setup_home(tmp_path, monkeypatch)
+    root = str(tmp_path / "proj")
+    memory.save_memory(root, "d", "desc", "user", "body")
+    meta, _ = memory.parse_frontmatter(memory.read_memory(root, "d")["content"])
+    assert meta.get("created") and meta.get("updated")     # 记了日期
+
+
+def test_dynamic_layer_stale_warning(tmp_path, monkeypatch):
+    _setup_home(tmp_path, monkeypatch)
+    root = str(tmp_path / "proj")
+    memory.save_memory(root, "anchor", "占位让索引非空", "project", "x")
+    old = ("---\nname: old-fact\ndescription: 旧事实\nupdated: 2020-01-01\n"
+           "metadata:\n  type: project\n---\n\n这是个很旧的记忆")
+    out = memory.dynamic_layer(root, "查", recalled=[("old-fact", old)])
+    assert "⚠️" in out and "天前" in out                   # ≥2 天 → stale 警告
+
+
+def test_load_index_truncation_warning(tmp_path, monkeypatch):
+    _setup_home(tmp_path, monkeypatch)
+    root = str(tmp_path / "proj")
+    mdir = memory.memory_dir(root)
+    mdir.mkdir(parents=True)
+    (mdir / "MEMORY.md").write_text(
+        "\n".join(f"- line{i}" for i in range(250)), encoding="utf-8")
+    assert "截断" in memory.load_index(root)               # 超 200 行 → 警告
+
+
+def test_recall_relevant_llm_and_fallback(tmp_path, monkeypatch):
+    _setup_home(tmp_path, monkeypatch)
+    root = str(tmp_path / "proj")
+    memory.save_memory(root, "target-mem", "关于 alpha 的事", "project", "b")
+    memory.save_memory(root, "other-mem", "无关的 beta", "project", "b")
+
+    class _Sel:
+        async def tool_complete(self, messages, specs):
+            return {"content": '选好了:["target-mem"]', "tool_calls": []}
+
+    hits = asyncio.run(memory.recall_relevant(root, "查 alpha", _Sel()))
+    assert [n for n, _ in hits] == ["target-mem"]          # 选择器挑中
+    kw = asyncio.run(memory.recall_relevant(root, "alpha", None))  # 无 provider
+    assert any(n == "target-mem" for n, _ in kw)           # 退关键词,仍命中
+
+
+def test_recall_relevant_multibracket_and_dedup(tmp_path, monkeypatch):
+    _setup_home(tmp_path, monkeypatch)
+    root = str(tmp_path / "proj")
+    for n in ("mem-a", "mem-b"):
+        memory.save_memory(root, n, f"about {n}", "project", "x")
+
+    class _Chatty:   # 话痨:两段方括号 + 同名重复
+        async def tool_complete(self, m, s):
+            return {"content": '相关:["mem-a","mem-a"],忽略 ["junk"]',
+                    "tool_calls": []}
+
+    hits = asyncio.run(memory.recall_relevant(root, "q", _Chatty()))
+    assert [n for n, _ in hits] == ["mem-a"]      # 取首段 + 去重,不含 junk/重复
+
+
+def test_recall_relevant_parse_fail_falls_back(tmp_path, monkeypatch):
+    _setup_home(tmp_path, monkeypatch)
+    root = str(tmp_path / "proj")
+    memory.save_memory(root, "alpha-mem", "关于 alpha", "project", "x")
+
+    class _Junk:     # 没有任何合法 JSON 数组 → 解析失败
+        async def tool_complete(self, m, s):
+            return {"content": "我觉得没有合适的", "tool_calls": []}
+
+    hits = asyncio.run(memory.recall_relevant(root, "alpha", _Junk()))
+    assert any(n == "alpha-mem" for n, _ in hits)  # 解析失败 → 退关键词,仍命中
+
+
+def test_recall_relevant_empty_respected(tmp_path, monkeypatch):
+    _setup_home(tmp_path, monkeypatch)
+    root = str(tmp_path / "proj")
+    memory.save_memory(root, "alpha-mem", "关于 alpha", "project", "x")
+
+    class _Empty:    # 模型明确给合法空数组 = 判定无相关
+        async def tool_complete(self, m, s):
+            return {"content": "[]", "tool_calls": []}
+
+    assert asyncio.run(memory.recall_relevant(root, "alpha", _Empty())) == []
 
 
 def test_safe_name_blocks_traversal(tmp_path, monkeypatch):

@@ -177,7 +177,8 @@ _SYS_UNIFIED = (
 )
 
 
-def _system_prompt(cwd: str, has_git: bool, task: str = "") -> str:
+def _system_prompt(cwd: str, has_git: bool, task: str = "",
+                   recalled: list | None = None) -> str:
     git_note = (
         "【安全网】你这一轮第一次改文件/跑命令前,系统会自动打一个 git "
         "检查点;用户可一键回滚你某一轮的改动——放手做,但仍要稳。"
@@ -192,7 +193,7 @@ def _system_prompt(cwd: str, has_git: bool, task: str = "") -> str:
     if skills:
         sys_content = skills + "\n\n" + sys_content
     # 记忆区(静态层 COGITO.md + 纪律 + 动态层索引/召回)追加到末尾
-    mem = memory.inject(cwd, task)
+    mem = memory.inject(cwd, task, recalled)
     if mem:
         sys_content = sys_content + "\n\n" + mem
     return sys_content
@@ -272,6 +273,21 @@ def _schedule_extract(session: AgentSession) -> None:
         pass
 
 
+async def _recall_for(cwd: str, task: str):
+    """为新会话召回相关记忆(小模型选择器;无可用 provider 退回关键词)。
+    **限时 8s**:选择器模型慢/卡时最坏 8s 即放弃(底层 provider 超时是 120s,
+    不限时会让开场最久死气 ~120s)。失败/超时/无 key 返回 None → 系统提示走
+    关键词召回兜底,绝不挡开会话。"""
+    try:
+        resolved = config.get_active_resolved()
+        provider = (build_provider(resolved)
+                    if resolved and resolved.get("api_key") else None)
+        return await asyncio.wait_for(
+            memory.recall_relevant(cwd, task, provider), timeout=8)
+    except Exception:  # noqa: BLE001 含 TimeoutError → None → 走关键词兜底
+        return None
+
+
 # 活跃会话缓存(内存);不在则从 JSON 载回(后端重启后可继续)
 _AGENT_SESSIONS: dict[str, AgentSession] = {}
 
@@ -320,11 +336,12 @@ async def agent_stream_start(task: str, web: bool = True
                              "或在顶部下拉切换)"})
         return
     has_git = os.path.isdir(os.path.join(cwd, ".git"))
+    recalled = await _recall_for(cwd, task)   # 小模型选择器召回相关记忆
     session = AgentSession(
         provider=_tool_provider, registry=_registry(cwd),
         confirm_policy=_confirm_policy(cwd), store=_AGENT_STORE,
-        system_prompt=_system_prompt(cwd, has_git, task), checkpoint=has_git,
-        context_hook=_make_context_hook(cwd),
+        system_prompt=_system_prompt(cwd, has_git, task, recalled),
+        checkpoint=has_git, context_hook=_make_context_hook(cwd),
     )
     _AGENT_SESSIONS[session.id] = session
     yield _sse({"type": "run", "run_id": session.id})

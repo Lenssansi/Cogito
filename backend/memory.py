@@ -21,7 +21,9 @@
 
 from __future__ import annotations
 
+import datetime
 import fnmatch
+import json
 import os
 import re
 from pathlib import Path
@@ -264,13 +266,23 @@ _INDEX_MAX_BYTES = 25000
 
 
 def load_index(root: str) -> str:
-    """开场加载 MEMORY.md 索引(前 200 行 / 25KB)。"""
+    """开场加载 MEMORY.md 索引。**行数 + 字节双截断**(防"长行索引炸弹":
+    极端下一条索引就是超长一行,只看行数察觉不到、塞进系统提示会爆窗口)。
+    任一上限先触发就截断,并追加一条警告让模型知道部分没加载。"""
     txt = _read(index_path(root))
     if not txt.strip():
         return ""
-    lines = txt.splitlines()[:_INDEX_MAX_LINES]
-    out = "\n".join(lines)
-    return out[:_INDEX_MAX_BYTES]
+    lines = txt.splitlines()
+    truncated = len(lines) > _INDEX_MAX_LINES
+    out = "\n".join(lines[:_INDEX_MAX_LINES])
+    raw = out.encode("utf-8")
+    if len(raw) > _INDEX_MAX_BYTES:
+        out = raw[:_INDEX_MAX_BYTES].decode("utf-8", "ignore")
+        truncated = True
+    if truncated:
+        out += ("\n[⚠️ 索引过大已截断,部分记忆未列出 —— 需要某条时直接 "
+                "memory_read 按名取]")
+    return out
 
 
 _WORD_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]")
@@ -309,18 +321,103 @@ def recall(root: str, query: str, k: int = 3) -> list[tuple[str, str]]:
     return [(n, full) for _, n, full in scored[:k]]
 
 
-def dynamic_layer(root: str, query: str) -> str:
-    """索引(常驻)+ 召回的若干条记忆全文(以背景信息形式)。"""
+def _today() -> str:
+    return datetime.date.today().isoformat()
+
+
+def _age_days(meta: dict[str, str], path: Path) -> int:
+    """记忆"年龄"(天):优先 frontmatter 的 updated/created,回退文件 mtime。"""
+    d = meta.get("updated") or meta.get("created") or ""
+    try:
+        y, mo, da = (int(x) for x in d.split("-"))
+        return max(0, (datetime.date.today() - datetime.date(y, mo, da)).days)
+    except (ValueError, TypeError):
+        pass
+    try:
+        mt = datetime.date.fromtimestamp(path.stat().st_mtime)
+        return max(0, (datetime.date.today() - mt).days)
+    except OSError:
+        return 0
+
+
+def _parse_name_list(content: str) -> list[str] | None:
+    """从模型回复里抽出 JSON 字符串数组(记忆 name)。容忍话痨/**多段方括号**:
+    逐个 [...] 块尝试,取第一个能解析成 list 的(贪婪 \\[.*\\] 会把两组括号并成
+    一段而解析失败)。返回 None=没解析出任何合法数组(=失败,调用方应退关键词);
+    返回 []=模型给了合法空数组(判定无相关,应尊重)。"""
+    for blk in re.findall(r"\[[^\[\]]*\]", content or ""):
+        try:
+            data = json.loads(blk)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, list):
+            return [str(x) for x in data if isinstance(x, (str, int))]
+    return None
+
+
+async def recall_relevant(root: str, query: str, provider: Any,
+                          k: int = 5) -> list[tuple[str, str]]:
+    """召回(小模型选择器版,对应 Claude Code 的"廉价模型做选择题"):把索引
+    (name — description)发给模型,让它挑出**确定有用**的若干条,宁少勿错。
+    provider 为 None / 调用出错 → 退回零成本关键词召回。返回 [(name, 全文)]。"""
+    mems = [(name, meta.get("description", ""))
+            for name, meta, _ in _iter_memories(root)]
+    if not mems:
+        return []
+    if provider is None:
+        return recall(root, query, k)
+    listing = "\n".join(f"- {n} — {d}" for n, d in mems)
+    sys = ("你是记忆选择器。下面是全部可用记忆(name — description)。只挑出"
+           "**根据 name 和 description 能确定对当前任务有帮助**的,宁可少选、不可"
+           "错选。只输出一个 JSON 字符串数组(选中记忆的 name);没有相关的就输出"
+           " []。不要输出 JSON 以外的任何字。")
+    user = f"当前任务:{query.strip()[:1500]}\n\n可用记忆:\n{listing}"
+    try:
+        resp = await provider.tool_complete(
+            [{"role": "system", "content": sys},
+             {"role": "user", "content": user}], [])
+    except Exception:  # noqa: BLE001 召回失败绝不影响主流程
+        return recall(root, query, k)
+    names = _parse_name_list(resp.get("content") or "")
+    if names is None:                # 模型有回复但没给出合法数组 → 退关键词召回
+        return recall(root, query, k)
+    valid = {n for n, _ in mems}
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for nm in names:                 # names==[] 表示模型判定无相关 → 尊重(返回空)
+        s = _safe_name(nm)
+        if s in valid and s not in seen:   # 在册校验 + 去重(防同名重复注入)
+            seen.add(s)
+            full = _read(memory_dir(root) / f"{s}.md").strip()
+            if full:
+                out.append((s, full))
+        if len(out) >= k:
+            break
+    return out
+
+
+def dynamic_layer(root: str, query: str,
+                  recalled: list[tuple[str, str]] | None = None) -> str:
+    """索引(常驻)+ 召回的若干条记忆全文(背景信息;≥2 天的加 stale 警告)。
+    recalled 由宿主传入(小模型选择器结果);None 则退回关键词召回。"""
     idx = load_index(root)
     if not idx:
         return ""   # 还没有任何记忆
     parts = [
-        "【你的记忆(动态层 —— 你过去自己记下的;是写时快照,引用前先对当前"
-        "代码核实)。索引如下,需要某条细节用 memory_read 取全文】:\n" + idx
+        "【你的记忆(动态层 —— 你过去自己记下的;是写时快照,不是现状,引用前"
+        "先核实再行动)。索引如下,需要某条细节用 memory_read 取全文】:\n" + idx
     ]
-    for name, full in recall(root, query):
-        if full:
-            parts.append(f"\n\n[召回记忆 · {name}]\n{full}")
+    items = recalled if recalled is not None else recall(root, query)
+    for name, full in items:
+        if not full:
+            continue
+        meta, _ = parse_frontmatter(full)
+        age = _age_days(meta, memory_dir(root) / f"{name}.md")
+        warn = ""
+        if age >= 2:                     # 时间感知:2 天以上=历史快照,主动警告
+            warn = (f"⚠️ 这条 {age} 天前记的(写时快照),引用前先核实(grep 路径/"
+                    f"函数/flag、读当前文件),发现过时就 memory_update 或忽略。\n")
+        parts.append(f"\n\n[召回记忆 · {name}]\n{warn}{full}")
     return "".join(parts)
 
 
@@ -331,20 +428,28 @@ DISCIPLINE = (
     "memory_update/memory_delete/memory_read 工具读写,无需也不能用普通文件"
     "工具碰它)。每条记忆 = 一个事实,带 name(kebab-case 短 slug)/ description"
     "(一句话摘要,**召回就靠它**,要写好)/ type:\n"
-    "  user — 用户是谁(角色/专长/偏好);feedback — 用户对你工作方式的指导"
-    "(必带 Why + 如何应用);project — 进行中的工作/目标/约束(代码和 git 里"
-    "看不出来的;相对日期转绝对);reference — 外部资源指针(URL/看板/ticket)。\n"
-    "**何时写**:学到**持久且非显然**的东西才记;只跟本次对话相关的别记;"
-    "代码结构/改过的 bug/git 历史/已在常驻指令里的——都**别重复记**。"
-    "先查有没有覆盖同一事的记忆,有就 memory_update 而不是新建;发现某条"
-    "错了就 memory_delete。正文里可用 [[别的name]] 互链。"
+    "  user — 用户是谁(角色/专长/偏好);\n"
+    "  feedback — 用户对你工作方式的指导;正文**必带** `Why:`(为何这么要求/踩过"
+    "什么坑)+ `How to apply:`(什么情况生效);\n"
+    "  project — 进行中的工作/目标/约束(代码和 git 里看不出来的);**同样必带 "
+    "Why/How to apply**(这两类最易过期,要让自己日后能判断还该不该信);相对日期"
+    "转**绝对**(『周四』写成具体日期);\n"
+    "  reference — 外部资源指针(URL/看板/ticket)。\n"
+    "**何时写**:学到**持久且非显然**的东西才记;只跟本次对话相关的别记;代码结构/"
+    "改过的 bug/git 历史/已在常驻指令里的——都**别重复记**(代码是活的、记忆是死的,"
+    "记了反成『权威的错误』)。先查有没有覆盖同一事的记忆,有就 memory_update 而非"
+    "新建;发现某条错了就 memory_delete。正文可用 [[别的name]] 互链。\n"
+    "**用记忆前先核实**:记忆是写时快照、不是现状。引用某条前——写了文件路径就先确认"
+    "文件在、写了函数/flag 就先 grep、用户要照建议动手就先验证;带 stale 警告的更要核实。"
 )
 
 
-def inject(root: str, task: str) -> str:
-    """组装要追加到系统提示末尾的完整记忆区(静态层 + 纪律 + 动态层)。"""
+def inject(root: str, task: str,
+           recalled: list[tuple[str, str]] | None = None) -> str:
+    """组装追加到系统提示末尾的记忆区(静态层 + 纪律 + 动态层)。
+    recalled = 小模型选择器召回结果;不传则动态层用关键词召回兜底。"""
     blocks = [b for b in (static_layer(root), DISCIPLINE,
-                          dynamic_layer(root, task)) if b]
+                          dynamic_layer(root, task, recalled)) if b]
     return "\n\n".join(blocks)
 
 
@@ -378,9 +483,15 @@ def save_memory(root: str, name: str, description: str,
     desc = " ".join(description.split())
     mdir = memory_dir(root)
     mdir.mkdir(parents=True, exist_ok=True)
-    fm = (f"---\nname: {nm}\ndescription: {desc}\n"
-          f"metadata:\n  type: {t}\n---\n\n{body.strip()}\n")
-    (mdir / f"{nm}.md").write_text(fm, encoding="utf-8")
+    path = mdir / f"{nm}.md"
+    today = _today()
+    created = today
+    if path.is_file():                   # 覆盖时保留原始 created
+        old_meta, _ = parse_frontmatter(_read(path))
+        created = old_meta.get("created") or today
+    fm = (f"---\nname: {nm}\ndescription: {desc}\ntype: {t}\n"
+          f"created: {created}\nupdated: {today}\n---\n\n{body.strip()}\n")
+    path.write_text(fm, encoding="utf-8")
     _rebuild_index(root)
     return {"saved": nm, "type": t}
 
