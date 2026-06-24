@@ -39,6 +39,12 @@ def _answer(text: str) -> dict:
     return {"content": text, "tool_calls": []}
 
 
+def _tc_think(name: str, args: dict, reasoning: str, cid: str = "c1") -> dict:
+    """思考模式下带 reasoning_content 的工具调用响应。"""
+    return {"content": "", "reasoning_content": reasoning,
+            "tool_calls": [{"id": cid, "name": name, "arguments": args}]}
+
+
 def _session(tmp_path, script, **kw) -> tuple[AgentSession, ScriptedProvider]:
     scope = DirScope(cwd=str(tmp_path), allowed_roots=[str(tmp_path)])
     reg = ToolRegistry(scope)
@@ -75,6 +81,22 @@ def test_happy_path_executes_tool_and_feeds_result_back(tmp_path):
     second_msgs = prov.calls[1][0]
     tool_msgs = [m for m in second_msgs if m.get("role") == "tool"]
     assert tool_msgs and "内容123" in tool_msgs[0]["content"]
+
+
+def test_thinking_reasoning_passed_back_with_tool_calls(tmp_path):
+    """思考模式 + 工具:带 tool_calls 的 assistant 消息必须回传 reasoning_content
+    (DeepSeek V4 硬性要求;缺了第二轮会被上游拒)。非思考模型无此字段,不受影响。"""
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    s, prov = _session(tmp_path, [
+        _tc_think("read_file", {"path": "a.txt"}, "我先读这个文件"),
+        _answer("done"),
+    ])
+    _collect(s.run("读 a.txt"))
+    second_msgs = prov.calls[1][0]                # 第二轮发回上游的 messages
+    asst = [m for m in second_msgs
+            if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert asst, "应有带 tool_calls 的 assistant 消息"
+    assert asst[0].get("reasoning_content") == "我先读这个文件"
 
 
 # ---------- 高危确认:断开式(默认) ----------

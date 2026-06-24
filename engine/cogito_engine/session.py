@@ -461,6 +461,10 @@ class AgentSession:
                                       tc["arguments"], ensure_ascii=False)}}
                     for tc in resp["tool_calls"]
                 ]
+                # 思考模型(DeepSeek V4 等):带工具调用的轮次必须把思考链一并
+                # 回传,否则上游在后续请求里报错。非思考模型无此字段,跳过。
+                if resp.get("reasoning_content"):
+                    asst["reasoning_content"] = resp["reasoning_content"]
             self.messages.append(asst)
 
             if not resp["tool_calls"]:

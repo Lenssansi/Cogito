@@ -57,6 +57,17 @@ class OpenAICompatProvider:
         except Exception:  # noqa: BLE001
             pass
 
+    def _clean_messages(self, messages: list[dict]) -> list[dict]:
+        """reasoning_content 是思考模式产物,且只有思考模式的请求才需要把它回传
+        (DeepSeek 硬性要求)。非思考请求(切到普通预设 / 别家端点)一律剥离,免得
+        这个私有字段被不认识它的 OpenAI 兼容端点 400。按"本次请求是否思考"判定,
+        比按 base_url 判更准(兼容 DeepSeek 走代理的情形)。"""
+        thinking = (self.extra_body.get("thinking") or {}).get("type") == "enabled"
+        if thinking or not any("reasoning_content" in m for m in messages):
+            return messages
+        return [{k: v for k, v in m.items() if k != "reasoning_content"}
+                for m in messages]
+
     async def stream_chat(
         self, messages: list[ChatMessage]
     ) -> AsyncIterator[tuple[str, str]]:
@@ -73,7 +84,7 @@ class OpenAICompatProvider:
         # 预设的额外参数(如 DeepSeek thinking、reasoning_effort)合并进请求体
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._clean_messages(messages),
             "stream": True,
             # 让上游在尾包附带 usage(DeepSeek/OpenAI 等支持;不支持的服务
             # 通常忽略该字段,拿不到就不计,绝不影响对话)
@@ -136,13 +147,14 @@ class OpenAICompatProvider:
         url = _normalize_base(self.base_url) + "/chat/completions"
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._clean_messages(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
             **({"tools": tools} if tools else {}),
             **self.extra_body,
         }
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         calls_acc: dict[int, dict[str, str]] = {}
         last_usage = None
         try:
@@ -178,6 +190,7 @@ class OpenAICompatProvider:
                         delta = choices[0].get("delta") or {}
                         rc = delta.get("reasoning_content")
                         if rc:
+                            reasoning_parts.append(rc)
                             yield ("reasoning", rc)
                         piece = delta.get("content")
                         if piece:
@@ -207,6 +220,7 @@ class OpenAICompatProvider:
             calls.append({"id": c["id"], "name": c["name"],
                           "arguments": args})
         yield ("final", {"content": "".join(content_parts),
+                         "reasoning_content": "".join(reasoning_parts),
                          "tool_calls": calls})
 
     async def tool_complete(
@@ -219,7 +233,7 @@ class OpenAICompatProvider:
         url = _normalize_base(self.base_url) + "/chat/completions"
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._clean_messages(messages),
             "stream": False,
             # 空 tools 不传:部分上游对 "tools": [] 报错(连通性自检会用到)
             **({"tools": tools} if tools else {}),
@@ -251,4 +265,6 @@ class OpenAICompatProvider:
                 args = {}
             calls.append({"id": tc.get("id", ""),
                           "name": fn.get("name", ""), "arguments": args})
-        return {"content": msg.get("content") or "", "tool_calls": calls}
+        return {"content": msg.get("content") or "",
+                "reasoning_content": msg.get("reasoning_content") or "",
+                "tool_calls": calls}

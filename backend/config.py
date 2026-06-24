@@ -32,21 +32,29 @@ else:
     DATA_DIR = PROJECT_ROOT / "data"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
-# DeepSeek 开箱预设（已据官方文档 2026-04：思考靠 thinking 参数，模型 v4-flash/pro）
+def _think_max_preset() -> dict[str, Any]:
+    """V4 Pro 最大推理强度(Think Max)预设。单独抽出,默认与迁移共用一处定义。"""
+    return {"label": "V4 Pro·Think Max", "model": "deepseek-v4-pro",
+            "extra_body": {"thinking": {"type": "enabled"},
+                           "reasoning_effort": "max"}}
+
+
+# DeepSeek 开箱预设(据官方文档:思考靠 extra_body.thinking 参数;V4 思考模式
+# 已支持 function-calling,故思考预设不再标 supports_tools:false;Think Max 靠
+# reasoning_effort:"max"。1M 上下文是服务端默认,无需参数。模型 v4-flash/pro)
 def _deepseek_presets() -> list[dict[str, Any]]:
-    # supports_tools: false 标记该预设无法使用 function-calling
-    # (DeepSeek 思考模式当前不支持工具)。agent/file 模式遇到会按规则兜底
+    # supports_tools: false 仅用于标记无法 function-calling 的预设(当前 V4 全支持)
     return [
         {"label": "V4 Flash·普通", "model": "deepseek-v4-flash",
          "extra_body": {"thinking": {"type": "disabled"}}},
         {"label": "V4 Flash·思考", "model": "deepseek-v4-flash",
-         "extra_body": {"thinking": {"type": "enabled"}},
-         "supports_tools": False},
+         "extra_body": {"thinking": {"type": "enabled"}}},
         {"label": "V4 Pro·普通", "model": "deepseek-v4-pro",
          "extra_body": {"thinking": {"type": "disabled"}}},
         {"label": "V4 Pro·思考", "model": "deepseek-v4-pro",
-         "extra_body": {"thinking": {"type": "enabled"}},
-         "supports_tools": False},
+         "extra_body": {"thinking": {"type": "enabled"}}},
+        # 最大推理强度(Think Max);思考链可能很长,1M 默认上下文放得下
+        _think_max_preset(),
     ]
 
 
@@ -247,6 +255,28 @@ def _migrate(s: dict[str, Any], raw: dict[str, Any]) -> bool:
     return True
 
 
+def _migrate_deepseek_presets(s: dict[str, Any]) -> bool:
+    """存量配置升级:V4 思考模式现已支持工具 → 去掉思考预设的 supports_tools 限制;
+    并为已有「V4 Pro·思考」的 DeepSeek provider 补上 Think Max 预设。
+    幂等;只动思考预设的该标记、补缺,不碰用户自定义预设,保留 api_key 等。"""
+    changed = False
+    for p in s.get("providers", []):
+        if "deepseek" not in p.get("base_url", "").lower():
+            continue
+        presets = p.get("presets") or []
+        for ps in presets:
+            thinking = (ps.get("extra_body", {}).get("thinking")
+                        or {}).get("type") == "enabled"
+            if thinking and "supports_tools" in ps:
+                ps.pop("supports_tools", None)   # V4 思考已支持工具
+                changed = True
+        labels = {ps.get("label") for ps in presets}
+        if "V4 Pro·思考" in labels and "V4 Pro·Think Max" not in labels:
+            presets.append(_think_max_preset())
+            changed = True
+    return changed
+
+
 _BAK_PATH = SETTINGS_PATH.with_suffix(".json.bak")
 
 
@@ -284,6 +314,8 @@ def load_settings() -> dict[str, Any]:
     if _migrate(s, raw):
         dirty = True
     if _ensure_local_provider(s):
+        dirty = True
+    if _migrate_deepseek_presets(s):   # V4 思考支持工具 + 补 Think Max(存量升级)
         dirty = True
     # 回填：早于 P3 迁移过的 provider 没 capability，DeepSeek 给默认值
     for p in s.get("providers", []):

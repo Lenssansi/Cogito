@@ -59,6 +59,49 @@ def test_tool_complete_parses_tool_calls():
     ]
 
 
+def test_tool_complete_returns_reasoning_content():
+    """思考模式:tool_complete 要把 reasoning_content 一并带回(供多轮回传;
+    DeepSeek V4 思考+工具要求带 tool_calls 的 assistant 必含思考链)。"""
+    payload = {"choices": [{"message": {
+        "content": "", "reasoning_content": "先想一下",
+        "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": "read_file",
+                                     "arguments": json.dumps({"path": "a"})}}],
+    }}]}
+    prov = OpenAICompatProvider(_cfg(), transport=_json_transport(payload))
+    r = asyncio.run(prov.tool_complete([{"role": "user", "content": "hi"}], []))
+    assert r["reasoning_content"] == "先想一下"
+    assert r["tool_calls"][0]["name"] == "read_file"
+
+
+def test_reasoning_content_stripped_when_request_not_thinking():
+    """reasoning_content 是思考模式产物,只有思考请求才需回传它(DeepSeek 要求)。
+    非思考请求(切到普通预设或别家端点)发送前必须剥离,免得未知字段被 400。"""
+    captured: dict = {}
+
+    def handler(req):
+        captured["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": "ok"}}]})
+
+    msgs = [{"role": "assistant", "content": "", "reasoning_content": "思考链",
+             "tool_calls": []}, {"role": "user", "content": "next"}]
+
+    # 非思考(extra_body 无 thinking.enabled)→ 剥离
+    p1 = OpenAICompatProvider(_cfg(extra_body={}),
+                              transport=httpx.MockTransport(handler))
+    asyncio.run(p1.tool_complete(msgs, []))
+    assert all("reasoning_content" not in m for m in captured["body"]["messages"])
+
+    # 思考(thinking.enabled)→ 保留
+    p2 = OpenAICompatProvider(
+        _cfg(extra_body={"thinking": {"type": "enabled"}}),
+        transport=httpx.MockTransport(handler))
+    asyncio.run(p2.tool_complete(msgs, []))
+    assert any(m.get("reasoning_content") == "思考链"
+               for m in captured["body"]["messages"])
+
+
 def test_bad_arguments_json_degrades_to_empty_dict():
     payload = {
         "choices": [{"message": {
@@ -230,6 +273,7 @@ def test_stream_tool_complete_streams_text_and_reasoning():
     kind, final = events[-1]
     assert kind == "final"
     assert final["content"] == "你好" and final["tool_calls"] == []
+    assert final["reasoning_content"] == "想"        # 思考增量需累积进 final
 
 
 def test_stream_tool_complete_parallel_calls_and_bad_json():
